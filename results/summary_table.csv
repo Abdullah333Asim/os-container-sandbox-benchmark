@@ -1,0 +1,6 @@
+,Security_Score_%,Default_Caps,Startup_ms,Idle_RAM_MB,Disk_IO_MB_s,Detection_Rate_%,Mean_Response_ms,Host_Utility_%,Inner_Proc_Visible
+docker,50.0,14,532.7,1.5,92.0,100.0,2029.3,97.0,True
+podman,87.5,11,460.0,1.6,134.3,100.0,2136.8,99.9,True
+containerd,50.0,14,924.0,1.6,107.3,100.0,1965.4,99.0,True
+gvisor,87.5,13,456.3,46.5,24.0,66.7,5399.6,97.8,False
+lxc,12.5,36,379.0,78.8,113.8,100.0,2412.9,99.3,True

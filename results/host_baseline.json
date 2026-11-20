@@ -1,0 +1,8 @@
+{
+  "iterations": 2007,
+  "elapsed_sec": 10.0,
+  "mean_ms": 4.98,
+  "median_ms": 4.81,
+  "max_ms": 11.24,
+  "throughput_ops_sec": 200.7
+}

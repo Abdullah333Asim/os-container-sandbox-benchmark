@@ -103,7 +103,8 @@ def main():
     parser.add_argument("--podman-user", default=os.environ.get("SUDO_USER", os.environ.get("USER", "root")))
     parser.add_argument("--timeout", type=float, default=15.0)
     parser.add_argument("--cpu-thresh", type=float, default=30.0)
-    parser.add_argument("--mem-thresh-mb", type=float, default=180.0)
+    parser.add_argument("--mem-thresh-mb", type=float, default=150.0)
+    parser.add_argument("--base-mem-mb", type=float, default=0.0)
     parser.add_argument("--io-thresh-mb", type=float, default=5.0)
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
@@ -181,7 +182,7 @@ def main():
 
         if cpu_hits >= 2:
             detected, trigger = True, "cpu"
-        elif total_rss_mb >= args.mem_thresh_mb:
+        elif (total_rss_mb - args.base_mem_mb) >= args.mem_thresh_mb:
             detected, trigger = True, "memory"
         elif io_mb >= args.io_thresh_mb:
             detected, trigger = True, "io"

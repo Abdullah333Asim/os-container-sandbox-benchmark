@@ -23,6 +23,15 @@ run_podman() {
     sudo -u "$REAL_USER" env XDG_RUNTIME_DIR="/run/user/${REAL_UID}" HOME="${REAL_HOME}" podman "$@"
 }
 
+time_ms() {
+    python3 -c '
+import subprocess, sys, time
+t0 = time.perf_counter()
+subprocess.run(sys.argv[1:], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+print(int((time.perf_counter() - t0) * 1000))
+' "$@"
+}
+
 cleanup_ctr() {
     local rt="$1"
     local name="$2"
@@ -42,30 +51,36 @@ echo " OS CONTAINER SANDBOX BENCHMARK (TRIALS=${TRIALS}, USER=${REAL_USER})"
 echo "================================================================"
 
 # ----------------------------------------------------------------
-# PHASE 1: Cold-Start Latency & Idle Memory Footprint
+# PHASE 1: Cold-Start Latency (Monotonic) & Idle Memory Footprint
 # ----------------------------------------------------------------
 echo "[Phase 1/5] Measuring startup latency & idle memory footprint..."
 echo "runtime,trial,startup_ms,idle_ram_mb" > results/startup_overhead.csv
 
+declare -A IDLE_RAM_MAP
+
 for rt in "${RUNTIMES[@]}"; do
+    ram_sum=0
     for t in $(seq 1 "$TRIALS"); do
-        t0=$(date +%s%3N)
         case "$rt" in
-            docker)     docker run --rm redteam-sandbox:latest /bin/true >/dev/null 2>&1 ;;
-            podman)     run_podman run --rm docker.io/library/redteam-sandbox:latest /bin/true >/dev/null 2>&1 ;;
-            containerd) nerdctl run --rm redteam-sandbox:latest /bin/true >/dev/null 2>&1 ;;
-            gvisor)     docker run --rm --runtime=runsc redteam-sandbox:latest /bin/true >/dev/null 2>&1 ;;
+            docker)
+                startup_ms=$(time_ms docker run --rm redteam-sandbox:latest /bin/true)
+                ;;
+            podman)
+                startup_ms=$(time_ms sudo -u "$REAL_USER" env XDG_RUNTIME_DIR="/run/user/${REAL_UID}" HOME="${REAL_HOME}" podman run --rm docker.io/library/redteam-sandbox:latest /bin/true)
+                ;;
+            containerd)
+                startup_ms=$(time_ms nerdctl run --rm redteam-sandbox:latest /bin/true)
+                ;;
+            gvisor)
+                startup_ms=$(time_ms docker run --rm --runtime=runsc redteam-sandbox:latest /bin/true)
+                ;;
             lxc)
                 lxc-stop -k -n redteam-lxc >/dev/null 2>&1 || true
-                lxc-start -n redteam-lxc >/dev/null 2>&1
-                lxc-attach -n redteam-lxc -- /bin/true >/dev/null 2>&1
+                startup_ms=$(time_ms bash -c "lxc-start -n redteam-lxc && lxc-attach -n redteam-lxc -- /bin/true")
+                lxc-stop -k -n redteam-lxc >/dev/null 2>&1 || true
                 ;;
         esac
-        t1=$(date +%s%3N)
-        startup_ms=$((t1 - t0))
-        [ "$rt" = "lxc" ] && lxc-stop -k -n redteam-lxc >/dev/null 2>&1 || true
 
-        # Measure idle RAM footprint
         cname="idle-bench"
         [ "$rt" = "lxc" ] && cname="redteam-lxc"
         cleanup_ctr "$rt" "$cname"
@@ -96,41 +111,46 @@ PYEOF
         cleanup_ctr "$rt" "$cname"
         echo "${rt},${t},${startup_ms},${idle_ram}" >> results/startup_overhead.csv
         echo "  startup | ${rt} trial ${t}: ${startup_ms} ms, idle RAM ${idle_ram} MB"
+        ram_sum=$(python3 -c "print(${ram_sum} + ${idle_ram})")
     done
+    IDLE_RAM_MAP[$rt]=$(python3 -c "print(round(${ram_sum} / ${TRIALS}, 2))")
 done
 
 # ----------------------------------------------------------------
-# PHASE 2: Disk I/O & Syscall Overhead (32 MB synced write on /)
+# PHASE 2: Syscall-Heavy Disk I/O Overhead (Timed INSIDE container)
 # ----------------------------------------------------------------
-echo "[Phase 2/5] Measuring disk I/O & syscall overhead (32 MB fdatasync)..."
+echo "[Phase 2/5] Measuring inside-container disk I/O & syscall overhead (32,768 x 512B fdatasync)..."
 echo "runtime,trial,io_time_ms,throughput_mb_s" > results/io_overhead.csv
 
-IO_CMD="dd if=/dev/zero of=/red_team/bench_io.dat bs=4k count=8192 conv=fdatasync 2>/dev/null && rm -f /red_team/bench_io.dat"
+IO_CMD="dd if=/dev/zero of=/red_team/bench_io.dat bs=512 count=32768 conv=fdatasync 2>&1; rm -f /red_team/bench_io.dat"
 
 for rt in "${RUNTIMES[@]}"; do
     for t in $(seq 1 "$TRIALS"); do
-        if [ "$rt" = "lxc" ]; then
-            lxc-stop -k -n redteam-lxc >/dev/null 2>&1 || true
-            lxc-start -n redteam-lxc >/dev/null 2>&1
-            sleep 1.5
-            t0=$(date +%s%3N)
-            lxc-attach -n redteam-lxc -- bash -c "$IO_CMD" >/dev/null 2>&1
-            t1=$(date +%s%3N)
-            lxc-stop -k -n redteam-lxc >/dev/null 2>&1 || true
-        else
-            t0=$(date +%s%3N)
-            case "$rt" in
-                docker)     docker run --rm redteam-sandbox:latest bash -c "$IO_CMD" >/dev/null 2>&1 ;;
-                podman)     run_podman run --rm docker.io/library/redteam-sandbox:latest bash -c "$IO_CMD" >/dev/null 2>&1 ;;
-                containerd) nerdctl run --rm redteam-sandbox:latest bash -c "$IO_CMD" >/dev/null 2>&1 ;;
-                gvisor)     docker run --rm --runtime=runsc redteam-sandbox:latest bash -c "$IO_CMD" >/dev/null 2>&1 ;;
-            esac
-            t1=$(date +%s%3N)
-        fi
-        io_ms=$((t1 - t0))
-        mb_s=$(python3 -c "print(round(32.0 / max(${io_ms}/1000.0, 0.001), 2))")
-        echo "${rt},${t},${io_ms},${mb_s}" >> results/io_overhead.csv
-        echo "  disk_io | ${rt} trial ${t}: ${io_ms} ms (${mb_s} MB/s)"
+        case "$rt" in
+            docker)     dd_out=$(docker run --rm redteam-sandbox:latest bash -c "$IO_CMD") ;;
+            podman)     dd_out=$(run_podman run --rm docker.io/library/redteam-sandbox:latest bash -c "$IO_CMD") ;;
+            containerd) dd_out=$(nerdctl run --rm redteam-sandbox:latest bash -c "$IO_CMD") ;;
+            gvisor)     dd_out=$(docker run --rm --runtime=runsc redteam-sandbox:latest bash -c "$IO_CMD") ;;
+            lxc)
+                lxc-stop -k -n redteam-lxc >/dev/null 2>&1 || true
+                lxc-start -n redteam-lxc >/dev/null 2>&1
+                sleep 1.5
+                dd_out=$(lxc-attach -n redteam-lxc -- bash -c "$IO_CMD")
+                lxc-stop -k -n redteam-lxc >/dev/null 2>&1 || true
+                ;;
+        esac
+        parsed=$(python3 - "$dd_out" << 'PYEOF'
+import re, sys
+txt = sys.argv[1]
+m = re.search(r"copied,\s+([0-9.]+)\s+s", txt)
+sec = float(m.group(1)) if m else 1.0
+io_ms = round(sec * 1000.0, 2)
+mb_s = round(16.0 / max(sec, 0.0001), 2)
+print(f"{io_ms},{mb_s}")
+PYEOF
+)
+        echo "${rt},${t},${parsed}" >> results/io_overhead.csv
+        echo "  disk_io | ${rt} trial ${t}: ${parsed} (ms, MB/s)"
     done
 done
 
@@ -161,10 +181,10 @@ for rt in "${RUNTIMES[@]}"; do
 done
 
 # ----------------------------------------------------------------
-# PHASE 4: Idle Host Ground-Truth Baseline
+# PHASE 4: Idle Host Ground-Truth Baseline (2s warmup + 10s measure)
 # ----------------------------------------------------------------
-echo "[Phase 4/5] Measuring idle host Ground Truth baseline (10s)..."
-python3 blue_team/host_workload.py --duration 10 --out results/host_baseline.json
+echo "[Phase 4/5] Measuring idle host Ground Truth baseline (2s warmup + 10s)..."
+python3 blue_team/host_workload.py --warmup 2 --duration 10 --out results/host_baseline.json
 BASE_OPS=$(python3 -c "import json; print(json.load(open('results/host_baseline.json'))['throughput_ops_sec'])")
 BASE_MS=$(python3 -c "import json; print(json.load(open('results/host_baseline.json'))['mean_ms'])")
 echo "  host baseline: ${BASE_OPS} ops/sec (mean loop ${BASE_MS} ms)"
@@ -176,6 +196,7 @@ echo "[Phase 5/5] Running Red Team vs. Blue Team arena..."
 echo "runtime,virus,gen,trial,detected,trigger,mttd_ms,containment_ms,total_response_ms,peak_cpu_pct,peak_mem_mb,peak_io_mb,inner_proc_visible,host_mean_ms,host_utility_pct" > results/arena_results.csv
 
 for rt in "${RUNTIMES[@]}"; do
+    base_mem="${IDLE_RAM_MAP[$rt]}"
     for virus in "${VIRUSES[@]}"; do
         for gen in "${GENS[@]}"; do
             for t in $(seq 1 "$TRIALS"); do
@@ -183,12 +204,10 @@ for rt in "${RUNTIMES[@]}"; do
                 [ "$rt" = "lxc" ] && cname="redteam-lxc"
                 cleanup_ctr "$rt" "$cname"
 
-                # Start innocent Host Ground Truth workload in background
                 rm -f /tmp/host_trial.json /tmp/bt_trial.json
                 python3 blue_team/host_workload.py --duration 25 --out /tmp/host_trial.json &
                 HOST_PID=$!
 
-                # Launch Red Team container
                 case "$rt" in
                     docker)
                         docker run -d --name "$cname" redteam-sandbox:latest /red_team/run_virus.sh "$virus" "$gen" >/dev/null 2>&1
@@ -209,20 +228,19 @@ for rt in "${RUNTIMES[@]}"; do
                         ;;
                 esac
 
-                # Run Blue Team monitor (15s cap handles Gen 2/3 mem_virus cleanly)
                 python3 blue_team/blue_team_monitor.py \
                     --runtime "$rt" \
                     --container "$cname" \
                     --podman-user "$REAL_USER" \
+                    --base-mem-mb "$base_mem" \
+                    --mem-thresh-mb 150.0 \
                     --timeout 15 \
                     --out /tmp/bt_trial.json >/dev/null
 
-                # Stop Host Ground Truth workload & wait for JSON flush
                 kill -TERM "$HOST_PID" 2>/dev/null || true
                 wait "$HOST_PID" 2>/dev/null || true
                 cleanup_ctr "$rt" "$cname"
 
-                # Append one clean CSV row
                 row=$(python3 - "$rt" "$virus" "$gen" "$t" "$BASE_OPS" << 'PYEOF'
 import json, sys
 rt, virus, gen, trial, base_ops = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], float(sys.argv[5])

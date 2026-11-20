@@ -1,0 +1,16 @@
+runtime,trial,startup_ms,idle_ram_mb
+docker,1,557,1.56
+docker,2,595,1.58
+docker,3,446,1.47
+podman,1,485,1.56
+podman,2,443,1.66
+podman,3,452,1.58
+containerd,1,889,1.46
+containerd,2,918,1.59
+containerd,3,965,1.66
+gvisor,1,520,46.32
+gvisor,2,445,46.75
+gvisor,3,404,46.39
+lxc,1,362,78.82
+lxc,2,411,78.62
+lxc,3,364,78.99

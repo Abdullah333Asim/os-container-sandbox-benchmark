@@ -87,7 +87,7 @@ for i, v in enumerate(ram_mean.values):
     ax1.text(i, v + max(ram_mean.values)*0.02, f"{v:.1f}", ha="center", va="bottom", fontsize=8.5)
 
 ax2.bar(x, io_mean.values, color=COLORS, edgecolor="black", linewidth=0.8)
-ax2.set_title("(b) 32 MB Synced Disk Write Throughput")
+ax2.set_title("(b) 16 MB Syscall-Heavy Write (32k x 512B)")
 ax2.set_ylabel("Throughput (MB/s) — Higher is Better")
 ax2.set_xticks(x)
 ax2.set_xticklabels([LABELS[rt] for rt in ORDER], fontsize=8.5)
