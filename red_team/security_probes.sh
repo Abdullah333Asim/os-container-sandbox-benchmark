@@ -31,7 +31,8 @@ else
 fi
 
 # 3. Kernel Ring Buffer Access (dmesg)
-if dmesg >/dev/null 2>&1; then
+DMESG_OUT=$(dmesg 2>/dev/null)
+if [ $? -eq 0 ] && ! echo "$DMESG_OUT" | grep -qi "gVisor"; then
     record "P3_DMESG_LOG" "EXPOSED" "readable"
 else
     record "P3_DMESG_LOG" "BLOCKED" "permission_denied"
