@@ -1,0 +1,9 @@
+*.out
+red_team/cpu_virus
+red_team/mem_virus
+red_team/io_virus
+__pycache__/
+*.pyc
+.venv/
+*.log
+/tmp/
