@@ -55,7 +55,11 @@ All experiments were executed on a single isolated Ubuntu 26.04 VMware Workstati
 \textbf{Ground-Truth Host Workload and Blue Team Monitor:} A benign host workload (\texttt{host\_workload.py}) continuously executed fixed floating-point arithmetic and 256~KB \texttt{fsync} writes outside the container (idle baseline: 200.7~ops/s, mean loop 4.98~ms) to quantify \textit{Benign Host Utility (\%)}. Simultaneously, a host-side monitor (\texttt{blue\_team\_monitor.py}) polled each container's cgroup v2 process tree every 0.2~s, triggering automated container termination upon CPU $\ge 30\%$ (two consecutive polls), delta RAM $\ge 150$~MB above each runtime's measured idle footprint, or host disk writes $\ge 5$~MB.
 
 \subsection{Module 1: Syscall and Network Microbenchmarks}
-\todo{Describe \texttt{syscall\_bench.c} (\texttt{getpid}, \texttt{open/close}, \texttt{pipe}, \texttt{mmap/munmap}, \texttt{fork/waitpid} across Bare Host + all 5 runtimes) and \texttt{net\_bench.c} (TCP/UDP RTT, throughput, and \texttt{SOCK\_RAW} isolation).}
+To isolate low-level operating system overhead from application logic, we compiled two C microbenchmarks (\texttt{gcc -O2}) inside the shared container image and on the Bare Host control environment, executing 5 trials per target:
+\begin{itemize}
+    \item \textbf{Syscall and Memory Primitives (\texttt{syscall\_bench.c}):} Measures mean latency in nanoseconds (\texttt{CLOCK\_MONOTONIC}) across five core kernel boundaries: \texttt{syscall(SYS\_getpid)} (50,000 iterations), \texttt{open()+close()} on \texttt{/dev/null} (10,000), 1-byte \texttt{pipe()} write/read IPC round-trips (20,000), anonymous 4~KB \texttt{mmap()} with a single-byte write fault and \texttt{munmap()} (10,000), and \texttt{fork()+\_exit()+waitpid()} process lifecycle cycles (200).
+    \item \textbf{Network Stack and Raw-Socket Isolation (\texttt{net\_bench.c}):} Connects each sandbox to a host-side C TCP server on port 18888 (using loopback \texttt{127.0.0.1} for Bare Host, host VM IP \texttt{192.168.2.128} for Docker, containerd, gVisor, and LXC, and the \texttt{host.containers.internal} gateway \texttt{169.254.1.2} for rootless Podman's \texttt{pasta} stack). Each trial measures 1,000 64-byte \texttt{TCP\_NODELAY} ping-pong round trips (after 50 warmup exchanges), a 32~MB TCP bulk stream (512 $\times$ 64~KB chunks), and an active \texttt{socket(AF\_INET, SOCK\_RAW, IPPROTO\_ICMP)} creation probe.
+\end{itemize}
 
 \subsection{Module 2: Starvation, Fork-Bomb, and Active Escape Suite v2}
 \todo{Describe 4-thread CPU/RAM starvation (\texttt{stress\_virus.c}), capped \texttt{fork\_bomb.c} (unconstrained vs.\ cgroup v2 caps), and the 15-test Active Escape Suite v2 across all 5 runtimes.}
@@ -119,7 +123,61 @@ LXC (system)                 & 12.5 (1/8) & 36 & \textbf{379.0} & 78.8 & 113.8 &
 \end{figure}
 
 \subsection{Module 1 Results: Syscall Latency and Network Stack Overhead}
-\todo{Insert \texttt{syscall\_bench.c} nanosecond table/figure and \texttt{net\_bench.c} TCP/UDP + \texttt{SOCK\_RAW} results across all 5 runtimes.}
+Tables~\ref{tab:m1_syscall} and~\ref{tab:m1_net} present the 5-trial microbenchmark results across the Bare Host control and all five container runtimes (visualized in Fig.~\ref{fig:fig5} and Fig.~\ref{fig:fig6}).
+
+\begin{table*}[t]
+\centering
+\caption{Module 1 Syscall and Virtual Memory Primitive Latency (Mean ns/op and Slowdown vs.\ Bare Host, 5 Trials)}
+\label{tab:m1_syscall}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Runtime} & \textbf{\texttt{getpid()}} & \textbf{\texttt{open()+close()}} & \textbf{\texttt{pipe()} R/W} & \textbf{\texttt{mmap+fault+munmap}} & \textbf{\texttt{fork()+waitpid()}} \\
+\midrule
+Bare Host (control)          & 815.6 (1.00$\times$) & 2,815.1 (1.00$\times$) & 1,957.2 (1.00$\times$) & 11,013.4 (1.00$\times$) & 379,273.1 (1.00$\times$) \\
+Docker (\texttt{runc})       & 1,130.3 (1.39$\times$) & 3,832.4 (1.36$\times$) & 2,132.1 (1.09$\times$) & 11,110.3 (1.01$\times$) & 294,451.9 (0.78$\times$) \\
+Podman (rootless)            & 845.7 (1.04$\times$) & 3,042.8 (1.08$\times$) & 2,031.0 (1.04$\times$) & 11,717.4 (1.06$\times$) & 364,395.9 (0.96$\times$) \\
+containerd (\texttt{nerdctl})& 994.1 (1.22$\times$) & 3,684.7 (1.31$\times$) & 2,048.0 (1.05$\times$) & 10,949.9 (0.99$\times$) & 351,985.9 (0.93$\times$) \\
+gVisor (\texttt{runsc})      & \textbf{15,236.6 (18.68$\times$)} & \textbf{9,136.8 (3.25$\times$)} & \textbf{9,309.5 (4.76$\times$)} & \textbf{337,946.0 (30.68$\times$)} & \textbf{3,767,931.4 (9.93$\times$)} \\
+LXC (system)                 & 854.4 (1.05$\times$) & 3,354.5 (1.19$\times$) & 2,062.5 (1.05$\times$) & 11,240.0 (1.02$\times$) & 373,245.1 (0.98$\times$) \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{table}[t]
+\centering
+\caption{Module 1 Network Stack Overhead and \texttt{SOCK\_RAW} Isolation (Mean $\pm$ Std, 5 Trials)}
+\label{tab:m1_net}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Runtime} & \textbf{TCP RTT ($\mu$s)} & \textbf{Throughput (MB/s)} & \textbf{\texttt{SOCK\_RAW}} \\
+\midrule
+Bare Host  & 120.79 $\pm$ 3.51  & 1769.93 $\pm$ 180.92 & EXPOSED \\
+Docker     & \textbf{58.91 $\pm$ 21.71}  & \textbf{1968.68 $\pm$ 821.81} & EXPOSED \\
+Podman     & 264.78 $\pm$ 5.37  & 641.69 $\pm$ 729.41  & \textbf{BLOCKED} \\
+containerd & \textbf{55.77 $\pm$ 22.59}  & 1796.03 $\pm$ 482.21 & EXPOSED \\
+gVisor     & 289.48 $\pm$ 29.58 & 573.38 $\pm$ 108.75  & \textbf{BLOCKED} \\
+LXC        & 119.33 $\pm$ 16.19 & 1840.48 $\pm$ 176.29 & EXPOSED \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Syscall Overhead Breakdown:} Docker, rootless Podman, containerd, and LXC exhibited near-native latency across all five OS primitives (0.78$\times$--1.39$\times$ of Bare Host), confirming that Linux namespaces and rootless UID remapping add negligible per-syscall cost. In contrast, gVisor's user-space Sentry interception imposed severe overhead on every primitive: 18.68$\times$ on \texttt{getpid()}, 3.25$\times$ on \texttt{open()+close()}, 4.76$\times$ on \texttt{pipe()} IPC, 30.68$\times$ on \texttt{mmap()+fault+munmap()}, and 9.93$\times$ on \texttt{fork()+waitpid()}.
+
+\textbf{Network Stack Trade-Off:} Docker, containerd, and LXC achieved high container-to-host TCP throughput (1,796--1,969~MB/s) and low RTT (55.8--119.3~$\mu$s), but all three allowed \texttt{SOCK\_RAW} ICMP socket creation. Conversely, both rootless Podman and gVisor blocked \texttt{SOCK\_RAW} (\texttt{errno 1}), while paying substantial container-to-host latency and throughput overhead: gVisor averaged 289.48~$\mu$s RTT and 573.38 $\pm$ 108.75~MB/s, and Podman averaged 264.78~$\mu$s RTT with high bulk-transfer variance (641.69 $\pm$ 729.41~MB/s across individual trials ranging from 50.64 to 1,497.86~MB/s).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{../results/figures/fig5_syscall_microbench.png}
+\caption{OS syscall and virtual memory primitive latency (log scale, mean $\pm$ std across 5 trials).}
+\label{fig:fig5}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{../results/figures/fig6_network_overhead.png}
+\caption{Container-to-host TCP RTT, 32~MB bulk throughput, and \texttt{SOCK\_RAW} isolation across Bare Host and all five runtimes.}
+\label{fig:fig6}
+\end{figure}
 
 \subsection{Module 2 Results: Concurrency Starvation and Escape Matrix v2}
 \todo{Insert unconstrained vs.\ cgroup-capped Host Utility drop under 4-thread starvation/fork-bomb and 15-test Active Escape Matrix across all 5 runtimes.}
