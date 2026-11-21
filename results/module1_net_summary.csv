@@ -1,0 +1,7 @@
+runtime,tcp_rtt_us_mean,tcp_rtt_us_std,tcp_mb_s_mean,tcp_mb_s_std,sock_raw
+host,120.79,3.51,1769.93,180.92,EXPOSED
+docker,58.91,21.71,1968.68,821.81,EXPOSED
+podman,264.78,5.37,641.69,729.41,BLOCKED
+containerd,55.77,22.59,1796.03,482.21,EXPOSED
+gvisor,289.48,29.58,573.38,108.75,BLOCKED
+lxc,119.33,16.19,1840.48,176.29,EXPOSED

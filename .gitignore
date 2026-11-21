@@ -7,3 +7,5 @@ __pycache__/
 .venv/
 *.log
 /tmp/
+microbench/syscall_bench
+microbench/net_bench
