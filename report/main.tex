@@ -1,0 +1,149 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{cite}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{url}
+\usepackage{xcolor}
+
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+
+\begin{document}
+
+\title{Security Isolation vs. Performance Overhead Across Five Linux Container Runtimes Under Active Red Team and Blue Team Workloads}
+
+\author{
+\IEEEauthorblockN{Muhammad Abdullah Asim, Maaz, and Bilal}
+\IEEEauthorblockA{Dhanani School of Science \& Engineering, Habib University, Karachi, Pakistan}
+}
+
+\maketitle
+
+\begin{abstract}
+% [LIVING DRAFT — UPDATE AFTER MODULES 1–3 COMPLETE]
+Linux containers isolate untrusted workloads through kernel namespaces, control groups (cgroups), Linux capabilities, and system call filtering, yet production runtimes differ substantially in default privilege boundaries and execution overhead. This study empirically benchmarks five widely deployed Linux container runtimes—Docker (\texttt{runc}), rootless Podman, containerd (\texttt{nerdctl}), gVisor (\texttt{runsc}), and LXC—across security isolation, low-level OS overhead, blast-radius containment, and host-side defensive observability. In Phase~1 (135 multi-generational Red Team vs. Blue Team trials plus startup, memory, syscall-heavy I/O, and 8-point isolation audits), rootless Podman and gVisor tied for the highest out-of-the-box isolation score (87.5\%), far outperforming default Docker (50.0\%), containerd (50.0\%), and rootful LXC (12.5\%). However, gVisor's user-space Sentry kernel incurred a 3.8$\times$--5.6$\times$ throughput penalty on syscall-dense writes (24.0~MB/s vs.\ 92.0--134.3~MB/s), increased idle memory ~30$\times$ (46.5~MB vs.\ 1.5--1.6~MB), and blinded host-side process and disk-I/O telemetry (reducing detection from 100\% to 66.7\%). \todo{Add final numbers from Modules 1--3: syscall nanoseconds, network overhead, fork-bomb/escape results, and eBPF vs.\ polling Blue Team comparison.}
+\end{abstract}
+
+\begin{IEEEkeywords}
+Linux Containers, Sandbox Security, gVisor, Podman, Docker, containerd, LXC, eBPF, Endpoint Detection and Response, Operating Systems.
+\end{IEEEkeywords}
+
+\section{Introduction}
+Containers virtualize operating system resources by combining Linux namespaces (PID, mount, network, IPC, UTS, user), control groups (cgroups v2), capabilities, and \texttt{seccomp-bpf} filters. Unlike hardware virtual machines, standard containers share the host Linux kernel, creating an inherent tension between attack-surface reduction, runtime performance, and host-side visibility for Endpoint Detection and Response (EDR) monitors.
+
+To determine which container sandbox offers the strongest operational trade-off across real-world deployment profiles, we evaluate five architecturally distinct runtimes on an identical Linux testbed:
+\begin{enumerate}
+    \item \textbf{Docker (\texttt{runc}):} Rootful central daemon (\texttt{dockerd}) sharing the host kernel with OCI default capabilities and seccomp rules.
+    \item \textbf{Podman (rootless):} Daemonless fork-exec architecture utilizing unprivileged user namespaces (\texttt{newuidmap}) to remap container root to an unprivileged host UID.
+    \item \textbf{containerd (\texttt{nerdctl}):} Lightweight CNCF container runtime bypassing the Docker daemon abstraction while retaining \texttt{runc} isolation primitives.
+    \item \textbf{gVisor (\texttt{runsc}):} Application-kernel sandbox intercepting guest syscalls in user space via its Sentry kernel and routing host filesystem I/O through a separate \texttt{runsc-gofer} proxy.
+    \item \textbf{LXC (system container):} Full OS-level container booting an internal \texttt{systemd} init tree with broader default capabilities.
+\end{enumerate}
+
+\textbf{Research Question:} How do Docker, rootless Podman, containerd, gVisor, and LXC trade off OS-level security isolation, resource-starvation containment, and Blue Team observability against low-level syscall, I/O, memory, and networking overhead under active adversarial workloads?
+
+\section{Methods}
+
+\subsection{Testbed Hardware and Parity Controls}
+All experiments were executed on a single isolated Ubuntu 26.04 VMware Workstation virtual machine (Linux kernel \texttt{7.0.0-38-generic}, cgroups v2, 4~vCPUs, 16~GB RAM, 40~GB virtual disk) to eliminate cross-machine variance. An identical Ubuntu 24.04 OCI image (\texttt{redteam-sandbox:latest}) containing compiled C payloads (\texttt{gcc -O2}) and probe scripts was built once and exported directly into Docker (shared with gVisor), Podman, and containerd, with identical binaries copied into the LXC root filesystem. Cold-start latency was measured using Python's monotonic clock (\texttt{time.perf\_counter()}) to prevent wall-clock NTP drift.
+
+\subsection{Phase 1: Red Team Payloads, Probes, and Host Telemetry}
+\textbf{Multi-Generational Red Team Viruses:} We deployed three C payloads targeting CPU (\texttt{cpu\_virus.c}), physical memory (\texttt{mem\_virus.c}, 400~MB), and disk persistence (\texttt{io\_virus.c}, writing \texttt{/tmp/os\_arena/hidden\_cron.sh} plus 20 noise files) across three evolutionary generations: Gen~1 (aggressive baseline), Gen~2 (pulsed timing / slow-drip allocation), and Gen~3 (process renaming via \texttt{prctl(PR\_SET\_NAME)} to \texttt{kworker/u4:2}, \texttt{systemd-journal}, and \texttt{rsyslogd}, plus parent-orphan forking). A wrapper script (\texttt{run\_virus.sh}) served as PID~1 so Gen~3 orphaned children remained alive inside containers.
+
+\textbf{Security Isolation Probes:} An 8-point non-destructive audit (\texttt{security\_probes.sh}) tested kernel version masking, \texttt{/proc/modules} visibility, host \texttt{dmesg} access (excluding synthetic gVisor decoy boot logs), user-namespace UID mapping, \texttt{CAP\_NET\_RAW} and total effective capability counts (\texttt{CapEff}), and restricted syscalls (\texttt{mount}, \texttt{unshare}, \texttt{mknod}).
+
+\textbf{Ground-Truth Host Workload and Blue Team Monitor:} A benign host workload (\texttt{host\_workload.py}) continuously executed fixed floating-point arithmetic and 256~KB \texttt{fsync} writes outside the container (idle baseline: 200.7~ops/s, mean loop 4.98~ms) to quantify \textit{Benign Host Utility (\%)}. Simultaneously, a host-side monitor (\texttt{blue\_team\_monitor.py}) polled each container's cgroup v2 process tree every 0.2~s, triggering automated container termination upon CPU $\ge 30\%$ (two consecutive polls), delta RAM $\ge 150$~MB above each runtime's measured idle footprint, or host disk writes $\ge 5$~MB.
+
+\subsection{Module 1: Syscall and Network Microbenchmarks}
+\todo{Describe \texttt{syscall\_bench.c} (\texttt{getpid}, \texttt{open/close}, \texttt{pipe}, \texttt{mmap/munmap}, \texttt{fork/waitpid} across Bare Host + all 5 runtimes) and \texttt{net\_bench.c} (TCP/UDP RTT, throughput, and \texttt{SOCK\_RAW} isolation).}
+
+\subsection{Module 2: Starvation, Fork-Bomb, and Active Escape Suite v2}
+\todo{Describe 4-thread CPU/RAM starvation (\texttt{stress\_virus.c}), capped \texttt{fork\_bomb.c} (unconstrained vs.\ cgroup v2 caps), and the 15-test Active Escape Suite v2 across all 5 runtimes.}
+
+\subsection{Module 3: Dual Blue Team Architecture (Polling vs.\ eBPF)}
+\todo{Describe kernel-level \texttt{bpftrace}/eBPF tracing (\texttt{execve}, \texttt{clone}, \texttt{openat}, \texttt{mount}) compared directly against user-space cgroup polling across all 5 runtimes.}
+
+\section{Results}
+
+\subsection{Phase 1: Baseline Security, Overhead, and Arena Performance}
+Table~\ref{tab:phase1_summary} summarizes the 3-trial baseline benchmark across all five runtimes (135 Red Team vs.\ Blue Team arena trials, 15 startup/memory trials, 15 syscall-heavy disk I/O trials, and 40 security probe evaluations).
+
+\begin{table*}[t]
+\centering
+\caption{Phase 1 Empirical Benchmark Summary Across Five Linux Container Runtimes (Mean of 3 Trials)}
+\label{tab:phase1_summary}
+\begin{tabular}{lccccccccc}
+\toprule
+\textbf{Runtime} & \textbf{Security} & \textbf{Default} & \textbf{Startup} & \textbf{Idle RAM} & \textbf{Syscall I/O} & \textbf{Detection} & \textbf{Mean Resp.} & \textbf{Host Util.} & \textbf{Inner PIDs} \\
+ & \textbf{Score (\%)} & \textbf{Caps} & \textbf{(ms)} & \textbf{(MB)} & \textbf{(MB/s)} & \textbf{Rate (\%)} & \textbf{(ms)} & \textbf{(\%)} & \textbf{Visible} \\
+\midrule
+Docker (\texttt{runc})       & 50.0 (4/8) & 14 & 532.7 & \textbf{1.5} & 92.0  & 100.0 & 2029.3 & 97.0 & Yes \\
+Podman (rootless)            & \textbf{87.5 (7/8)} & \textbf{11} & 460.0 & 1.6 & \textbf{134.3} & 100.0 & 2136.8 & \textbf{99.9} & Yes \\
+containerd (\texttt{nerdctl})& 50.0 (4/8) & 14 & 924.0 & 1.6 & 107.3 & 100.0 & \textbf{1965.4} & 99.0 & Yes \\
+gVisor (\texttt{runsc})      & \textbf{87.5 (7/8)} & 13 & 456.3 & 46.5 & 24.0  & 66.7  & 5399.6 & 97.8 & \textbf{No} \\
+LXC (system)                 & 12.5 (1/8) & 36 & \textbf{379.0} & 78.8 & 113.8 & 100.0 & 2412.9 & 99.3 & Yes \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\textbf{Isolation vs.\ Syscall Overhead:} As shown in Fig.~\ref{fig:fig1} and Fig.~\ref{fig:fig3}, rootless Podman and gVisor tied at 87.5\% (7/8 probes blocked). Podman achieved this through unprivileged UID remapping (\texttt{0 -> 1000}), dropping to 11 effective capabilities, and blocking \texttt{mknod}. gVisor was the sole runtime to mask the host kernel (\texttt{4.19.0-gvisor}) and serve synthetic decoy \texttt{dmesg} output. However, Fig.~\ref{fig:fig2} exposes gVisor's user-space interception tax: writing 32,768 $\times$ 512~B blocks with \texttt{fdatasync} dropped gVisor to 24.0~MB/s (3.8$\times$--5.6$\times$ slower than native runtimes) while requiring 46.5~MB of idle RAM (~30$\times$ Docker/Podman).
+
+\textbf{The Observability vs.\ Isolation Paradox:} In the 135-trial arena (Fig.~\ref{fig:fig4}), host-side polling achieved 100\% detection across Docker, Podman, containerd, and LXC, with containerd yielding the fastest kill teardown (~162~ms) and LXC the slowest (~746~ms). Under gVisor, inner process names vanished completely from host \texttt{/proc} telemetry (\texttt{Inner PIDs Visible = No}), Gen~2/3 slow-drip \texttt{mem\_virus} detection slowed from ~5.7~s (native runtimes) to ~14.0~s, and all 9 \texttt{io\_virus} trials evaded host disk-I/O detection (66.7\% overall detection) because gVisor mounts \texttt{/tmp} as an in-memory \texttt{tmpfs} inside Sentry—shielding the host disk while hiding write bursts from host \texttt{/proc/<pid>/io} accounting.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{../results/figures/fig1_isolation_vs_startup.png}
+\caption{Security isolation score vs.\ cold-start latency across all five runtimes.}
+\label{fig:fig1}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{../results/figures/fig2_resource_io_overhead.png}
+\caption{Idle container RAM footprint and 16~MB syscall-heavy disk write throughput.}
+\label{fig:fig2}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{../results/figures/fig3_security_probe_heatmap.png}
+\caption{Out-of-the-box security isolation probe matrix and default Linux capability counts.}
+\label{fig:fig3}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{../results/figures/fig4_blueteam_and_host_utility.png}
+\caption{Blue Team response latency, detection efficacy, and host ground-truth utility under attack.}
+\label{fig:fig4}
+\end{figure}
+
+\subsection{Module 1 Results: Syscall Latency and Network Stack Overhead}
+\todo{Insert \texttt{syscall\_bench.c} nanosecond table/figure and \texttt{net\_bench.c} TCP/UDP + \texttt{SOCK\_RAW} results across all 5 runtimes.}
+
+\subsection{Module 2 Results: Concurrency Starvation and Escape Matrix v2}
+\todo{Insert unconstrained vs.\ cgroup-capped Host Utility drop under 4-thread starvation/fork-bomb and 15-test Active Escape Matrix across all 5 runtimes.}
+
+\subsection{Module 3 Results: Polling vs.\ Kernel eBPF Blue Team}
+\todo{Insert eBPF vs.\ polling MTTD comparison, Gen 1--3 evasion curves, and the final 5-runtime Weighted Decision Matrix.}
+
+\section{Discussion}
+% [LIVING NOTES — EXPAND AFTER MODULES 1–3]
+\begin{itemize}
+    \item \textbf{Architectural Equivalence of Docker and containerd:} Identical 50.0\% probe scores and 14 capabilities confirm both rely on shared OCI \texttt{runc} defaults; differences emerge primarily in CLI/CNI startup overhead and kill latency.
+    \item \textbf{Why Isolation Can Blind Defenders:} gVisor's \texttt{tmpfs} \texttt{/tmp} and Sentry process hiding demonstrate that stronger sandboxes protect host storage/kernels while forcing Blue Teams to adapt telemetry pipelines.
+    \item \todo{Add analysis of syscall nanosecond breakdown, network stack differences (\texttt{netstack} vs.\ \texttt{pasta} vs.\ \texttt{docker0}), cgroup enforcement under starvation, and eBPF visibility limits on gVisor.}
+\end{itemize}
+
+\section{Conclusion and Future Work}
+% [LIVING VERDICT — FINALIZE WITH WEIGHTED DECISION MATRIX]
+Preliminary Phase~1 findings indicate that \textbf{rootless Podman} provides the strongest general-purpose balance of security (87.5\%, 11 capabilities), syscall throughput (134.3~MB/s), low memory footprint (1.6~MB), and full Blue Team visibility, whereas \textbf{gVisor} provides superior kernel-boundary defense for untrusted multi-tenant code at the cost of heavy I/O/memory overhead and reduced host observability. \todo{Finalize deployment recommendations using the full weighted decision matrix across all four experimental phases.}
+
+\begin{thebibliography}{1}
+\bibitem{gvisor} Google, ``gVisor: Application Kernel for Containers,'' \url{https://gvisor.dev/docs/}, 2026.
+\bibitem{podman} Red Hat, ``Podman: Daemonless, Rootless Linux Containers,'' \url{https://podman.io/}, 2026.
+\bibitem{oci} Open Container Initiative, ``OCI Runtime Specification,'' \url{https://opencontainers.org/}, 2026.
+\todo{Add 4--6 peer-reviewed IEEE/USENIX papers on container security, gVisor overhead, and eBPF runtime defense.}
+\end{thebibliography}
+
+\end{document}
