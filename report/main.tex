@@ -4,9 +4,8 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{url}
-\usepackage{xcolor}
 
-\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+\graphicspath{{../results/figures/}{figures/}}
 
 \begin{document}
 
@@ -20,137 +19,145 @@
 \maketitle
 
 \begin{abstract}
-% [LIVING DRAFT — UPDATE AFTER MODULES 1–3 COMPLETE]
-Linux containers isolate untrusted workloads through kernel namespaces, control groups (cgroups), Linux capabilities, and system call filtering, yet production runtimes differ substantially in default privilege boundaries and execution overhead. This study empirically benchmarks five widely deployed Linux container runtimes—Docker (\texttt{runc}), rootless Podman, containerd (\texttt{nerdctl}), gVisor (\texttt{runsc}), and LXC—across security isolation, low-level OS overhead, blast-radius containment, and host-side defensive observability. In Phase~1 (135 multi-generational Red Team vs. Blue Team trials plus startup, memory, syscall-heavy I/O, and 8-point isolation audits), rootless Podman and gVisor tied for the highest out-of-the-box isolation score (87.5\%), far outperforming default Docker (50.0\%), containerd (50.0\%), and rootful LXC (12.5\%). However, gVisor's user-space Sentry kernel incurred a 3.8$\times$--5.6$\times$ throughput penalty on syscall-dense writes (24.0~MB/s vs.\ 92.0--134.3~MB/s), increased idle memory ~30$\times$ (46.5~MB vs.\ 1.5--1.6~MB), and blinded host-side process and disk-I/O telemetry (reducing detection from 100\% to 66.7\%). \todo{Add final numbers from Modules 1--3: syscall nanoseconds, network overhead, fork-bomb/escape results, and eBPF vs.\ polling Blue Team comparison.}
+Linux containers separate programs using kernel namespaces, control groups (cgroups v2), Linux capabilities, and system call filters. However, different container runtimes use different default settings, which creates trade-offs between security, speed, and how well host monitoring tools can see inside a container. In this project, we tested five Linux container runtimes---Docker (\texttt{runc}), rootless Podman, containerd (\texttt{nerdctl}), gVisor (\texttt{runsc}), and LXC---on the same Ubuntu virtual machine across four test stages: (1) Phase~1 baseline startup, memory, disk I/O, 8-point security checks, and 135 Red Team vs.\ Blue Team polling trials; (2) Module~1 C microbenchmarks for 5 system call operations and container-to-host TCP networking against a Bare Host control; (3) Module~2 tests including a 15-probe active security audit, a 500-process fork bomb, and an 8-thread CPU starvation test; and (4) Module~3 with 135 kernel eBPF (\texttt{bpftrace}) detection trials. In the 15-probe security audit, rootless Podman scored highest (73.3\%, 11 capabilities) and was the only runtime that blocked reading a bind-mounted host \texttt{root:root} secret file. gVisor placed second (66.7\%, 13 capabilities), Docker and containerd tied (53.3\%, 14 capabilities each), and default LXC scored lowest (13.3\%, 36 capabilities). Native shared-kernel runtimes stayed close to Bare Host syscall speed (0.78$\times$--1.39$\times$), while gVisor was 3.25$\times$--30.68$\times$ slower on syscalls, 3.8$\times$--5.6$\times$ slower on syscall-heavy disk writes (24.0~MB/s), and used 46.5~MB idle RAM. Both Podman and gVisor blocked raw ICMP sockets (\texttt{SOCK\_RAW}), but both had slower container-to-host TCP latency (264.8 and 289.5~$\mu$s) than Docker, containerd, and LXC (55.8--119.3~$\mu$s). Without cgroup limits, all five runtimes allowed all 500 fork-bomb processes and dropped host CPU utility to 55.3\%--58.3\%. Adding cgroup v2 limits stopped the fork bomb and raised host CPU utility back to 80.5\%--85.0\%. Finally, kernel eBPF detected 100\% of attacks in 3.08--5.73~ms on Docker, Podman, containerd, and LXC (cutting total response time by 2.05$\times$--3.92$\times$), but detected 0.0\% on gVisor because guest syscalls do not reach host kernel tracepoints.
 \end{abstract}
 
 \begin{IEEEkeywords}
-Linux Containers, Sandbox Security, gVisor, Podman, Docker, containerd, LXC, eBPF, Endpoint Detection and Response, Operating Systems.
+Linux Containers, Sandbox Security, gVisor, Podman, Docker, containerd, LXC, eBPF, cgroups, Operating Systems.
 \end{IEEEkeywords}
 
 \section{Introduction}
-Containers virtualize operating system resources by combining Linux namespaces (PID, mount, network, IPC, UTS, user), control groups (cgroups v2), capabilities, and \texttt{seccomp-bpf} filters. Unlike hardware virtual machines, standard containers share the host Linux kernel, creating an inherent tension between attack-surface reduction, runtime performance, and host-side visibility for Endpoint Detection and Response (EDR) monitors.
+Containers package and isolate applications using Linux kernel features such as namespaces (PID, mount, network, IPC, UTS, user), control groups (cgroups v2), capabilities, and \texttt{seccomp} syscall filters~\cite{felter2015,sultan2019}. Unlike virtual machines, most containers share the host Linux kernel. Because they share the kernel, weaker default rules can expose the host to attacks~\cite{lin2018}, while stronger isolation layers can slow down system calls and I/O~\cite{young2019} or hide container activity from host security monitors~\cite{gregg2019}.
 
-To determine which container sandbox offers the strongest operational trade-off across real-world deployment profiles, we evaluate five architecturally distinct runtimes on an identical Linux testbed:
+To find out which runtime works best for different use cases, we tested five Linux container runtimes side by side on the same test machine:
 \begin{enumerate}
-    \item \textbf{Docker (\texttt{runc}):} Rootful central daemon (\texttt{dockerd}) sharing the host kernel with OCI default capabilities and seccomp rules.
-    \item \textbf{Podman (rootless):} Daemonless fork-exec architecture utilizing unprivileged user namespaces (\texttt{newuidmap}) to remap container root to an unprivileged host UID.
-    \item \textbf{containerd (\texttt{nerdctl}):} Lightweight CNCF container runtime bypassing the Docker daemon abstraction while retaining \texttt{runc} isolation primitives.
-    \item \textbf{gVisor (\texttt{runsc}):} Application-kernel sandbox intercepting guest syscalls in user space via its Sentry kernel and routing host filesystem I/O through a separate \texttt{runsc-gofer} proxy.
-    \item \textbf{LXC (system container):} Full OS-level container booting an internal \texttt{systemd} init tree with broader default capabilities.
+    \item \textbf{Docker (\texttt{runc}):} Uses a root background daemon (\texttt{dockerd}) and default OCI capabilities and syscall filters~\cite{oci}.
+    \item \textbf{Podman (rootless):} Runs without a root daemon and uses user namespaces to map container UID~0 to a normal non-root user on the host~\cite{podman}.
+    \item \textbf{containerd (\texttt{nerdctl}):} Runs OCI containers through \texttt{containerd} and \texttt{runc} without the Docker daemon layer.
+    \item \textbf{gVisor (\texttt{runsc}):} Runs a user-space application kernel (Sentry) that handles container system calls instead of passing them directly to the host Linux kernel~\cite{gvisor}.
+    \item \textbf{LXC (system container):} Boots a full Linux user space with broader default kernel capabilities.
 \end{enumerate}
 
-\textbf{Research Question:} How do Docker, rootless Podman, containerd, gVisor, and LXC trade off OS-level security isolation, resource-starvation containment, and Blue Team observability against low-level syscall, I/O, memory, and networking overhead under active adversarial workloads?
+\textbf{Research Question:} How do Docker, rootless Podman, containerd, gVisor, and LXC compare in security isolation, resource-starvation containment, host monitoring visibility, and system performance (syscalls, disk I/O, memory, and networking) under active Red Team and Blue Team workloads?
 
 \section{Methods}
 
-\subsection{Testbed Hardware and Parity Controls}
-All experiments were executed on a single isolated Ubuntu 26.04 VMware Workstation virtual machine (Linux kernel \texttt{7.0.0-38-generic}, cgroups v2, 4~vCPUs, 16~GB RAM, 40~GB virtual disk) to eliminate cross-machine variance. An identical Ubuntu 24.04 OCI image (\texttt{redteam-sandbox:latest}) containing compiled C payloads (\texttt{gcc -O2}) and probe scripts was built once and exported directly into Docker (shared with gVisor), Podman, and containerd, with identical binaries copied into the LXC root filesystem. Cold-start latency was measured using Python's monotonic clock (\texttt{time.perf\_counter()}) to prevent wall-clock NTP drift.
+\subsection{Test Machine and Fair Comparison Setup}
+All tests ran inside one Ubuntu 26.04 VMware virtual machine (4~vCPUs, 16~GB RAM, 40~GB virtual disk, cgroups v2). Phase~1 ran on Linux kernel \texttt{7.0.0-38-generic}, and after a system update, Modules~2 and~3 ran on \texttt{7.0.0-43-generic}. To keep software identical across all five runtimes, we built one Ubuntu 24.04 container image (\texttt{redteam-sandbox:latest}) with all C programs compiled using \texttt{gcc -O2}. We exported that same image into Docker (also used by gVisor), Podman, and containerd, and copied the exact compiled binaries into the LXC root filesystem.
 
-\subsection{Phase 1: Red Team Payloads, Probes, and Host Telemetry}
-\textbf{Multi-Generational Red Team Viruses:} We deployed three C payloads targeting CPU (\texttt{cpu\_virus.c}), physical memory (\texttt{mem\_virus.c}, 400~MB), and disk persistence (\texttt{io\_virus.c}, writing \texttt{/tmp/os\_arena/hidden\_cron.sh} plus 20 noise files) across three evolutionary generations: Gen~1 (aggressive baseline), Gen~2 (pulsed timing / slow-drip allocation), and Gen~3 (process renaming via \texttt{prctl(PR\_SET\_NAME)} to \texttt{kworker/u4:2}, \texttt{systemd-journal}, and \texttt{rsyslogd}, plus parent-orphan forking). A wrapper script (\texttt{run\_virus.sh}) served as PID~1 so Gen~3 orphaned children remained alive inside containers.
-
-\textbf{Security Isolation Probes:} An 8-point non-destructive audit (\texttt{security\_probes.sh}) tested kernel version masking, \texttt{/proc/modules} visibility, host \texttt{dmesg} access (excluding synthetic gVisor decoy boot logs), user-namespace UID mapping, \texttt{CAP\_NET\_RAW} and total effective capability counts (\texttt{CapEff}), and restricted syscalls (\texttt{mount}, \texttt{unshare}, \texttt{mknod}).
-
-\textbf{Ground-Truth Host Workload and Blue Team Monitor:} A benign host workload (\texttt{host\_workload.py}) continuously executed fixed floating-point arithmetic and 256~KB \texttt{fsync} writes outside the container (idle baseline: 200.7~ops/s, mean loop 4.98~ms) to quantify \textit{Benign Host Utility (\%)}. Simultaneously, a host-side monitor (\texttt{blue\_team\_monitor.py}) polled each container's cgroup v2 process tree every 0.2~s, triggering automated container termination upon CPU $\ge 30\%$ (two consecutive polls), delta RAM $\ge 150$~MB above each runtime's measured idle footprint, or host disk writes $\ge 5$~MB.
+\subsection{Phase 1: Baseline Overhead, Probes, and Polling Arena}
+\begin{itemize}
+    \item \textbf{Startup and Idle RAM (3 trials):} Measured how long each runtime took to start and run \texttt{/bin/true} using Python's monotonic clock, and measured host resident memory (\texttt{RSS}) of an idle container.
+    \item \textbf{Syscall-Heavy Disk I/O (3 trials):} Ran \texttt{dd} inside each container to write 32,768 small 512-byte blocks (16~MB total) with \texttt{fdatasync} to stress write system calls.
+    \item \textbf{8-Point Security Probe (\texttt{security\_probes.sh}):} Checked kernel version visibility (\texttt{uname -r}), \texttt{/proc/modules}, \texttt{dmesg}, user-namespace UID mapping, effective capability count (\texttt{CapEff}) and \texttt{CAP\_NET\_RAW}, plus \texttt{mount}, \texttt{unshare}, and \texttt{mknod}.
+    \item \textbf{135-Trial Red Team vs.\ Blue Team Arena:} We ran three C viruses---CPU (\texttt{cpu\_virus.c}), Memory (\texttt{mem\_virus.c}, 400~MB), and Disk I/O (\texttt{io\_virus.c}, writing \texttt{/tmp/os\_arena/hidden\_cron.sh} and 20 noise files)---across three generations: Gen~1 (direct baseline), Gen~2 (slower/pulsed behavior), and Gen~3 (renaming the process with \texttt{prctl(PR\_SET\_NAME)} to \texttt{kworker/u4:2}, \texttt{systemd-journal}, or \texttt{rsyslogd}). A wrapper script (\texttt{run\_virus.sh}) ran as PID~1. Outside the container, \texttt{host\_workload.py} ran a continuous math and 256~KB \texttt{fsync} loop (idle baseline: 200.7~ops/s, mean loop 4.98~ms) to measure \textit{Host Utility (\%)}. At the same time, \texttt{blue\_team\_monitor.py} polled each container's cgroup every 0.2~s and killed the container if CPU $\ge 30\%$ for two polls, RAM grew $\ge 150$~MB above idle, or host disk writes reached $\ge 5$~MB.
+\end{itemize}
 
 \subsection{Module 1: Syscall and Network Microbenchmarks}
-To isolate low-level operating system overhead from application logic, we compiled two C microbenchmarks (\texttt{gcc -O2}) inside the shared container image and on the Bare Host control environment, executing 5 trials per target:
+We compiled two C benchmarks (\texttt{gcc -O2}) for the Bare Host control and all five runtimes and ran 5 trials per target:
 \begin{itemize}
-    \item \textbf{Syscall and Memory Primitives (\texttt{syscall\_bench.c}):} Measures mean latency in nanoseconds (\texttt{CLOCK\_MONOTONIC}) across five core kernel boundaries: \texttt{syscall(SYS\_getpid)} (50,000 iterations), \texttt{open()+close()} on \texttt{/dev/null} (10,000), 1-byte \texttt{pipe()} write/read IPC round-trips (20,000), anonymous 4~KB \texttt{mmap()} with a single-byte write fault and \texttt{munmap()} (10,000), and \texttt{fork()+\_exit()+waitpid()} process lifecycle cycles (200).
-    \item \textbf{Network Stack and Raw-Socket Isolation (\texttt{net\_bench.c}):} Connects each sandbox to a host-side C TCP server on port 18888 (using loopback \texttt{127.0.0.1} for Bare Host, host VM IP \texttt{192.168.2.128} for Docker, containerd, gVisor, and LXC, and the \texttt{host.containers.internal} gateway \texttt{169.254.1.2} for rootless Podman's \texttt{pasta} stack). Each trial measures 1,000 64-byte \texttt{TCP\_NODELAY} ping-pong round trips (after 50 warmup exchanges), a 32~MB TCP bulk stream (512 $\times$ 64~KB chunks), and an active \texttt{socket(AF\_INET, SOCK\_RAW, IPPROTO\_ICMP)} creation probe.
+    \item \textbf{Syscall Benchmark (\texttt{syscall\_bench.c}):} Used \texttt{clock\_gettime(CLOCK\_MONOTONIC)} to measure nanoseconds per operation for five OS primitives: \texttt{syscall(SYS\_getpid)} (50,000 runs), \texttt{open()+close()} on \texttt{/dev/null} (10,000), 1-byte \texttt{pipe()} write/read (20,000), 4~KB \texttt{mmap()} + 1-byte write + \texttt{munmap()} (10,000), and \texttt{fork()+\_exit()+waitpid()} (200).
+    \item \textbf{Network Benchmark (\texttt{net\_bench.c}):} Connected each container to a host C TCP server on port 18888 (using \texttt{127.0.0.1} on Bare Host, \texttt{192.168.2.128} on Docker, containerd, gVisor, and LXC, and \texttt{host.containers.internal} at \texttt{169.254.1.2} on rootless Podman). Each trial measured 1,000 64-byte \texttt{TCP\_NODELAY} round trips (after 50 warmup packets), a 32~MB TCP bulk stream (512 $\times$ 64~KB chunks), and a raw socket check calling \texttt{socket(AF\_INET, SOCK\_RAW, IPPROTO\_ICMP)}.
 \end{itemize}
 
-\subsection{Module 2: Starvation, Fork-Bomb, and Active Escape Suite v2}
-To evaluate active privilege boundaries and concurrency blast radius under uniform configurations (Linux kernel \texttt{7.0.0-43-generic}), we executed three additional tests across all five runtimes:
+\subsection{Module 2: Active Escapes, Fork-Bomb, and CPU Starvation}
+We ran three uniform tests across all five runtimes:
 \begin{itemize}
-    \item \textbf{15-Test Active Escape and Privilege Audit (\texttt{escape\_suite\_v2.sh}, \texttt{escape\_helper.c}):} Extends the 8-point baseline audit to 15 active checks by adding C syscall probes for \texttt{ptrace(PTRACE\_ATTACH)} (\texttt{P09}), \texttt{bpf(BPF\_MAP\_CREATE)} with a minimal \texttt{BPF\_MAP\_TYPE\_ARRAY} descriptor (\texttt{P10}), \texttt{setns()} on \texttt{/proc/self/ns/mnt} (\texttt{P11}), \texttt{chroot("/tmp")} (\texttt{P12}), \texttt{keyctl()} (\texttt{P13}), write-access checks on \texttt{/proc/sysrq-trigger} and \texttt{/sys} (\texttt{P14}), and a misconfigured read-only bind-mount test exposing a host \texttt{root:root} (\texttt{0600}) canary file at \texttt{/host\_canary/host\_secret.txt} (\texttt{P15}).
-    \item \textbf{Capped Fork-Bomb Containment (\texttt{fork\_bomb.c}):} Attempts to spawn 500 concurrent child processes, holds them for 0.5~s, and terminates/reaps all children. Each runtime was tested for 3 trials under unconstrained defaults and under a 64-PID cgroup v2 cap (\texttt{--pids-limit=64} or \texttt{lxc-cgroup pids.max 64}).
-    \item \textbf{8-Thread CPU Starvation (\texttt{stress\_virus.c}):} Launches 8 POSIX threads burning integer loops for 10~s while a 4-worker CPU-only host workload (\texttt{host\_workload.py --cpu-only --workers 4}, idle baseline 238.99~ops/s, mean loop 16.76~ms) measures host throughput over the middle 6~s across 3 trials—comparing unconstrained containers against 1-CPU cgroup v2 quotas (\texttt{--cpus=1} or \texttt{cpu.max "100000 100000"}).
+    \item \textbf{15-Test Active Security Audit (\texttt{escape\_suite\_v2.sh}, \texttt{escape\_helper.c}):} Kept the 8 baseline checks (\texttt{P01}--\texttt{P08}, with \texttt{P05} actively calling \texttt{SOCK\_RAW}) and added 7 active tests: \texttt{ptrace(PTRACE\_ATTACH)} (\texttt{P09}), \texttt{bpf(BPF\_MAP\_CREATE)} using a minimal \texttt{BPF\_MAP\_TYPE\_ARRAY} struct (\texttt{P10}), \texttt{setns()} on \texttt{/proc/self/ns/mnt} (\texttt{P11}), \texttt{chroot("/tmp")} (\texttt{P12}), \texttt{keyctl()} (\texttt{P13}), write checks on \texttt{/proc/sysrq-trigger} and \texttt{/sys} (\texttt{P14}), and a bind-mount test mounting a host \texttt{root:root} (\texttt{0600}) canary file read-only at \texttt{/host\_canary/host\_secret.txt} (\texttt{P15}).
+    \item \textbf{Capped Fork Bomb (\texttt{fork\_bomb.c}, 3 trials):} Tried to fork 500 child processes, held them for 0.5~s, and cleaned them up. Tested both default unconstrained settings and a 64-PID cap (\texttt{--pids-limit=64} or \texttt{lxc-cgroup pids.max 64}).
+    \item \textbf{8-Thread CPU Starvation (\texttt{stress\_virus.c}, 3 trials):} Ran 8 CPU-burning threads for 10~s while 4 CPU-only host workers (\texttt{host\_workload.py --cpu-only --workers 4}, idle baseline 238.99~ops/s, mean loop 16.76~ms) measured host speed during the middle 6~s. Tested unconstrained containers against a 1-CPU cap (\texttt{--cpus=1} or \texttt{cpu.max "100000 100000"}).
 \end{itemize}
 
-\subsection{Module 3: Dual Blue Team Architecture (Polling vs.\ eBPF)}
-\todo{Describe kernel-level \texttt{bpftrace}/eBPF tracing (\texttt{execve}, \texttt{clone}, \texttt{openat}, \texttt{mount}) compared directly against user-space cgroup polling across all 5 runtimes.}
+\subsection{Module 3: Kernel eBPF Blue Team and Decision Matrix}
+We replaced user-space polling with a persistent \texttt{bpftrace} (v0.25.0) kernel sensor (\texttt{ebpf\_sensors.bt}, controlled by \texttt{ebpf\_arena.py}) and ran the exact same 135-trial virus matrix (5 runtimes $\times$ 3 viruses $\times$ 3 generations $\times$ 3 trials, 4.0~s timeout). The eBPF script watched three Linux kernel tracepoints~\cite{gregg2019}:
+\begin{itemize}
+    \item \texttt{sched:sched\_process\_exec}: Logged \texttt{WRAPPER} when \texttt{/red\_team/run\_virus.sh} started and fired an \texttt{EXEC} alert when \texttt{cpu\_virus}, \texttt{mem\_virus}, or \texttt{io\_virus} executed.
+    \item \texttt{syscalls:sys\_enter\_openat}: Fired an \texttt{OPENAT} alert when any process opened a file under \texttt{/tmp/os\_arena}.
+    \item \texttt{syscalls:sys\_enter\_prctl} (\texttt{option == 15}): Fired a \texttt{PRCTL\_SPOOF} alert when a process tried to rename itself to \texttt{kworker/u4:2}, \texttt{systemd-journal}, or \texttt{rsyslogd}.
+\end{itemize}
+On the first alert, the monitor recorded the kernel detection time (nanoseconds from \texttt{WRAPPER} to alert) and immediately killed the container (\texttt{docker rm -f}, \texttt{podman rm -f -t 0}, \texttt{nerdctl rm -f}, or \texttt{lxc-stop -k}).
+
+To compare all five runtimes fairly at the end, we normalized our measured results onto a 0--100 scale across five areas: Security (15-probe score), Syscall \& Disk I/O (equal mix of syscall speed and disk write speed), Network (equal mix of TCP speed and inverse RTT), Resource Efficiency (equal mix of startup speed and low idle RAM), and Blue Team Visibility (average of polling and eBPF detection rates). We then calculated scores under three example weighting profiles to show how the best runtime changes depending on what a user cares about most.
 
 \section{Results}
 
-\subsection{Phase 1: Baseline Security, Overhead, and Arena Performance}
-Table~\ref{tab:phase1_summary} summarizes the 3-trial baseline benchmark across all five runtimes (135 Red Team vs.\ Blue Team arena trials, 15 startup/memory trials, 15 syscall-heavy disk I/O trials, and 40 security probe evaluations).
+\subsection{Phase 1: Baseline Security, Overhead, and Polling Arena}
+Table~\ref{tab:phase1_summary} shows the Phase~1 averages across all five runtimes (visualized in Figs.~\ref{fig:fig1}--\ref{fig:fig4}).
 
 \begin{table*}[t]
 \centering
-\caption{Phase 1 Empirical Benchmark Summary Across Five Linux Container Runtimes (Mean of 3 Trials)}
+\caption{Phase 1 Baseline Summary Across Five Linux Container Runtimes (Mean of 3 Trials; 135 Arena Trials)}
 \label{tab:phase1_summary}
 \begin{tabular}{lccccccccc}
 \toprule
-\textbf{Runtime} & \textbf{Security} & \textbf{Default} & \textbf{Startup} & \textbf{Idle RAM} & \textbf{Syscall I/O} & \textbf{Detection} & \textbf{Mean Resp.} & \textbf{Host Util.} & \textbf{Inner PIDs} \\
+\textbf{Runtime} & \textbf{Security} & \textbf{Default} & \textbf{Startup} & \textbf{Idle RAM} & \textbf{Disk I/O} & \textbf{Detection} & \textbf{Mean Resp.} & \textbf{Host Util.} & \textbf{Inner PIDs} \\
  & \textbf{Score (\%)} & \textbf{Caps} & \textbf{(ms)} & \textbf{(MB)} & \textbf{(MB/s)} & \textbf{Rate (\%)} & \textbf{(ms)} & \textbf{(\%)} & \textbf{Visible} \\
 \midrule
-Docker (\texttt{runc})       & 50.0 (4/8) & 14 & 532.7 & \textbf{1.5} & 92.0  & 100.0 & 2029.3 & 97.0 & Yes \\
-Podman (rootless)            & \textbf{87.5 (7/8)} & \textbf{11} & 460.0 & 1.6 & \textbf{134.3} & 100.0 & 2136.8 & \textbf{99.9} & Yes \\
-containerd (\texttt{nerdctl})& 50.0 (4/8) & 14 & 924.0 & 1.6 & 107.3 & 100.0 & \textbf{1965.4} & 99.0 & Yes \\
-gVisor (\texttt{runsc})      & \textbf{87.5 (7/8)} & 13 & 456.3 & 46.5 & 24.0  & 66.7  & 5399.6 & 97.8 & \textbf{No} \\
-LXC (system)                 & 12.5 (1/8) & 36 & \textbf{379.0} & 78.8 & 113.8 & 100.0 & 2412.9 & 99.3 & Yes \\
+Docker (\texttt{runc})        & 50.0 (4/8) & 14 & 532.7 & \textbf{1.5} & 92.0  & 100.0 & 2,029.3 & 97.0 & Yes \\
+Podman (rootless)             & \textbf{87.5 (7/8)} & \textbf{11} & 460.0 & 1.6 & \textbf{134.3} & 100.0 & 2,136.8 & \textbf{99.9} & Yes \\
+containerd (\texttt{nerdctl}) & 50.0 (4/8) & 14 & 924.0 & 1.6 & 107.3 & 100.0 & \textbf{1,965.4} & 99.0 & Yes \\
+gVisor (\texttt{runsc})       & \textbf{87.5 (7/8)} & 13 & 456.3 & 46.5 & 24.0  & 66.7  & 5,399.6 & 97.8 & \textbf{No} \\
+LXC (system)                  & 12.5 (1/8) & 36 & \textbf{379.0} & 78.8 & 113.8 & 100.0 & 2,412.9 & 99.3 & Yes \\
 \bottomrule
 \end{tabular}
 \end{table*}
 
-\textbf{Isolation vs.\ Syscall Overhead:} As shown in Fig.~\ref{fig:fig1} and Fig.~\ref{fig:fig3}, rootless Podman and gVisor tied at 87.5\% (7/8 probes blocked). Podman achieved this through unprivileged UID remapping (\texttt{0 -> 1000}), dropping to 11 effective capabilities, and blocking \texttt{mknod}. gVisor was the sole runtime to mask the host kernel (\texttt{4.19.0-gvisor}) and serve synthetic decoy \texttt{dmesg} output. However, Fig.~\ref{fig:fig2} exposes gVisor's user-space interception tax: writing 32,768 $\times$ 512~B blocks with \texttt{fdatasync} dropped gVisor to 24.0~MB/s (3.8$\times$--5.6$\times$ slower than native runtimes) while requiring 46.5~MB of idle RAM (~30$\times$ Docker/Podman).
+In Phase~1, rootless Podman and gVisor tied at 87.5\% (7/8 probes blocked), ahead of Docker and containerd (50.0\%, 4/8) and LXC (12.5\%, 1/8 with 36 capabilities). However, gVisor's small-block disk write speed dropped to 24.0~MB/s (3.8$\times$--5.6$\times$ slower than the other four runtimes at 92.0--134.3~MB/s), and its idle RAM was 46.5~MB (about 30$\times$ higher than Docker, Podman, and containerd at 1.5--1.6~MB). LXC started fastest (379.0~ms) but used the most idle RAM (78.8~MB).
 
-\textbf{The Observability vs.\ Isolation Paradox:} In the 135-trial arena (Fig.~\ref{fig:fig4}), host-side polling achieved 100\% detection across Docker, Podman, containerd, and LXC, with containerd yielding the fastest kill teardown (~162~ms) and LXC the slowest (~746~ms). Under gVisor, inner process names vanished completely from host \texttt{/proc} telemetry (\texttt{Inner PIDs Visible = No}), Gen~2/3 slow-drip \texttt{mem\_virus} detection slowed from ~5.7~s (native runtimes) to ~14.0~s, and all 9 \texttt{io\_virus} trials evaded host disk-I/O detection (66.7\% overall detection) because gVisor mounts \texttt{/tmp} as an in-memory \texttt{tmpfs} inside Sentry—shielding the host disk while hiding write bursts from host \texttt{/proc/<pid>/io} accounting.
+In the 135 polling trials, the Blue Team caught 100\% of viruses on Docker, Podman, containerd, and LXC, with average total response times between 1,965.4 and 2,412.9~ms. On gVisor, inner process names did not appear in host \texttt{/proc}, and the polling monitor missed all 9 \texttt{io\_virus} runs (66.7\% total detection) because host disk write counters showed no burst. Because the Phase~1 viruses were single-threaded, Host Utility stayed high across all runtimes (97.0\%--99.9\%).
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{../results/figures/fig1_isolation_vs_startup.png}
-\caption{Security isolation score vs.\ cold-start latency across all five runtimes.}
+\includegraphics[width=\linewidth]{fig1_isolation_vs_startup.png}
+\caption{Phase 1 security score vs.\ cold-start latency across all five runtimes.}
 \label{fig:fig1}
 \end{figure}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{../results/figures/fig2_resource_io_overhead.png}
-\caption{Idle container RAM footprint and 16~MB syscall-heavy disk write throughput.}
+\includegraphics[width=\linewidth]{fig2_resource_io_overhead.png}
+\caption{Idle container RAM usage and 16~MB small-block disk write throughput.}
 \label{fig:fig2}
 \end{figure}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{../results/figures/fig3_security_probe_heatmap.png}
-\caption{Out-of-the-box security isolation probe matrix and default Linux capability counts.}
+\includegraphics[width=\linewidth]{fig3_security_probe_heatmap.png}
+\caption{Phase 1 8-point security probe matrix and default Linux capability counts.}
 \label{fig:fig3}
 \end{figure}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{../results/figures/fig4_blueteam_and_host_utility.png}
-\caption{Blue Team response latency, detection efficacy, and host ground-truth utility under attack.}
+\includegraphics[width=\linewidth]{fig4_blueteam_and_host_utility.png}
+\caption{Phase 1 polling Blue Team response time, detection rate, and host utility.}
 \label{fig:fig4}
 \end{figure}
 
-\subsection{Module 1 Results: Syscall Latency and Network Stack Overhead}
-Tables~\ref{tab:m1_syscall} and~\ref{tab:m1_net} present the 5-trial microbenchmark results across the Bare Host control and all five container runtimes (visualized in Fig.~\ref{fig:fig5} and Fig.~\ref{fig:fig6}).
+\subsection{Module 1: Syscall Latency and Network Stack Overhead}
+Tables~\ref{tab:m1_syscall} and~\ref{tab:m1_net} list the 5-trial syscall and network results (plotted in Figs.~\ref{fig:fig5} and~\ref{fig:fig6}).
 
 \begin{table*}[t]
 \centering
-\caption{Module 1 Syscall and Virtual Memory Primitive Latency (Mean ns/op and Slowdown vs.\ Bare Host, 5 Trials)}
+\caption{Module 1 Syscall and Memory Operation Latency (Mean ns/op and Ratio vs.\ Bare Host, 5 Trials)}
 \label{tab:m1_syscall}
 \begin{tabular}{lccccc}
 \toprule
 \textbf{Runtime} & \textbf{\texttt{getpid()}} & \textbf{\texttt{open()+close()}} & \textbf{\texttt{pipe()} R/W} & \textbf{\texttt{mmap+fault+munmap}} & \textbf{\texttt{fork()+waitpid()}} \\
 \midrule
-Bare Host (control)          & 815.6 (1.00$\times$) & 2,815.1 (1.00$\times$) & 1,957.2 (1.00$\times$) & 11,013.4 (1.00$\times$) & 379,273.1 (1.00$\times$) \\
-Docker (\texttt{runc})       & 1,130.3 (1.39$\times$) & 3,832.4 (1.36$\times$) & 2,132.1 (1.09$\times$) & 11,110.3 (1.01$\times$) & 294,451.9 (0.78$\times$) \\
-Podman (rootless)            & 845.7 (1.04$\times$) & 3,042.8 (1.08$\times$) & 2,031.0 (1.04$\times$) & 11,717.4 (1.06$\times$) & 364,395.9 (0.96$\times$) \\
-containerd (\texttt{nerdctl})& 994.1 (1.22$\times$) & 3,684.7 (1.31$\times$) & 2,048.0 (1.05$\times$) & 10,949.9 (0.99$\times$) & 351,985.9 (0.93$\times$) \\
-gVisor (\texttt{runsc})      & \textbf{15,236.6 (18.68$\times$)} & \textbf{9,136.8 (3.25$\times$)} & \textbf{9,309.5 (4.76$\times$)} & \textbf{337,946.0 (30.68$\times$)} & \textbf{3,767,931.4 (9.93$\times$)} \\
-LXC (system)                 & 854.4 (1.05$\times$) & 3,354.5 (1.19$\times$) & 2,062.5 (1.05$\times$) & 11,240.0 (1.02$\times$) & 373,245.1 (0.98$\times$) \\
+Bare Host (control)           & 815.6 (1.00$\times$) & 2,815.1 (1.00$\times$) & 1,957.2 (1.00$\times$) & 11,013.4 (1.00$\times$) & 379,273.1 (1.00$\times$) \\
+Docker (\texttt{runc})        & 1,130.3 (1.39$\times$) & 3,832.4 (1.36$\times$) & 2,132.1 (1.09$\times$) & 11,110.3 (1.01$\times$) & 294,451.9 (0.78$\times$) \\
+Podman (rootless)             & 845.7 (1.04$\times$) & 3,042.8 (1.08$\times$) & 2,031.0 (1.04$\times$) & 11,717.4 (1.06$\times$) & 364,395.9 (0.96$\times$) \\
+containerd (\texttt{nerdctl}) & 994.1 (1.22$\times$) & 3,684.7 (1.31$\times$) & 2,048.0 (1.05$\times$) & 10,949.9 (0.99$\times$) & 351,985.9 (0.93$\times$) \\
+gVisor (\texttt{runsc})       & \textbf{15,236.6 (18.68$\times$)} & \textbf{9,136.8 (3.25$\times$)} & \textbf{9,309.5 (4.76$\times$)} & \textbf{337,946.0 (30.68$\times$)} & \textbf{3,767,931.4 (9.93$\times$)} \\
+LXC (system)                  & 854.4 (1.05$\times$) & 3,354.5 (1.19$\times$) & 2,062.5 (1.05$\times$) & 11,240.0 (1.02$\times$) & 373,245.1 (0.98$\times$) \\
 \bottomrule
 \end{tabular}
 \end{table*}
 
 \begin{table}[t]
 \centering
-\caption{Module 1 Network Stack Overhead and \texttt{SOCK\_RAW} Isolation (Mean $\pm$ Std, 5 Trials)}
+\caption{Module 1 Container-to-Host Network Overhead and \texttt{SOCK\_RAW} Probe (Mean $\pm$ Std, 5 Trials)}
 \label{tab:m1_net}
 \begin{tabular}{lccc}
 \toprule
@@ -166,34 +173,34 @@ LXC        & 119.33 $\pm$ 16.19 & 1840.48 $\pm$ 176.29 & EXPOSED \\
 \end{tabular}
 \end{table}
 
-\textbf{Syscall Overhead Breakdown:} Docker, rootless Podman, containerd, and LXC exhibited near-native latency across all five OS primitives (0.78$\times$--1.39$\times$ of Bare Host), confirming that Linux namespaces and rootless UID remapping add negligible per-syscall cost. In contrast, gVisor's user-space Sentry interception imposed severe overhead on every primitive: 18.68$\times$ on \texttt{getpid()}, 3.25$\times$ on \texttt{open()+close()}, 4.76$\times$ on \texttt{pipe()} IPC, 30.68$\times$ on \texttt{mmap()+fault+munmap()}, and 9.93$\times$ on \texttt{fork()+waitpid()}.
+Docker, Podman, containerd, and LXC stayed close to Bare Host on all five OS primitives (0.78$\times$--1.39$\times$). gVisor was much slower on every operation: 18.68$\times$ slower on \texttt{getpid()}, 3.25$\times$ on \texttt{open()+close()}, 4.76$\times$ on \texttt{pipe()}, 30.68$\times$ on \texttt{mmap()+fault+munmap()}, and 9.93$\times$ on \texttt{fork()+waitpid()}.
 
-\textbf{Network Stack Trade-Off:} Docker, containerd, and LXC achieved high container-to-host TCP throughput (1,796--1,969~MB/s) and low RTT (55.8--119.3~$\mu$s), but all three allowed \texttt{SOCK\_RAW} ICMP socket creation. Conversely, both rootless Podman and gVisor blocked \texttt{SOCK\_RAW} (\texttt{errno 1}), while paying substantial container-to-host latency and throughput overhead: gVisor averaged 289.48~$\mu$s RTT and 573.38 $\pm$ 108.75~MB/s, and Podman averaged 264.78~$\mu$s RTT with high bulk-transfer variance (641.69 $\pm$ 729.41~MB/s across individual trials ranging from 50.64 to 1,497.86~MB/s).
+On networking, Docker, containerd, and LXC reached high TCP speeds (1,796--1,969~MB/s) and low RTT (55.8--119.3~$\mu$s), but all three allowed creating raw ICMP sockets (\texttt{SOCK\_RAW}). Only Podman and gVisor blocked \texttt{SOCK\_RAW} (\texttt{errno 1}), while having much higher TCP latency (264.78~$\mu$s and 289.48~$\mu$s) and lower average throughput (641.69 and 573.38~MB/s). Podman also had high trial-to-trial variation on bulk TCP transfers (50.64 to 1,497.86~MB/s across its 5 trials).
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{../results/figures/fig5_syscall_microbench.png}
-\caption{OS syscall and virtual memory primitive latency (log scale, mean $\pm$ std across 5 trials).}
+\includegraphics[width=\linewidth]{fig5_syscall_microbench.png}
+\caption{Latency per operation (log scale) across five OS primitives (5 trials).}
 \label{fig:fig5}
 \end{figure}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{../results/figures/fig6_network_overhead.png}
-\caption{Container-to-host TCP RTT, 32~MB bulk throughput, and \texttt{SOCK\_RAW} isolation across Bare Host and all five runtimes.}
+\includegraphics[width=\linewidth]{fig6_network_overhead.png}
+\caption{Container-to-host TCP RTT, 32~MB bulk throughput, and \texttt{SOCK\_RAW} results (5 trials).}
 \label{fig:fig6}
 \end{figure}
 
-\subsection{Module 2 Results: Concurrency Starvation and Escape Matrix v2}
-Table~\ref{tab:m2_summary} summarizes the verified Module~2 outcomes across all five runtimes, with detailed breakdowns in Fig.~\ref{fig:fig7} and Fig.~\ref{fig:fig8}.
+\subsection{Module 2: Active Escapes, Fork-Bomb, and CPU Starvation}
+Table~\ref{tab:m2_summary} summarizes the Module~2 tests across all five runtimes (plotted in Figs.~\ref{fig:fig7} and~\ref{fig:fig8}).
 
 \begin{table*}[t]
 \centering
-\caption{Module 2 Active Escape Audit (15 Probes), Fork-Bomb Containment, and 8-Thread CPU Starvation (Mean $\pm$ Std, 3 Trials)}
+\caption{Module 2 Active Security Audit (15 Probes), Fork-Bomb Containment, and 8-Thread CPU Starvation (Mean $\pm$ Std, 3 Trials)}
 \label{tab:m2_summary}
 \begin{tabular}{lccccccc}
 \toprule
-\textbf{Runtime} & \textbf{Escape Score} & \textbf{\texttt{P10} \texttt{bpf()}} & \textbf{\texttt{P15} Canary} & \textbf{Fork-Bomb} & \textbf{Fork-Bomb} & \textbf{Host Util. (\%)} & \textbf{Host Util. (\%)} \\
+\textbf{Runtime} & \textbf{15-Probe} & \textbf{\texttt{P10} \texttt{bpf()}} & \textbf{\texttt{P15} Canary} & \textbf{Fork-Bomb} & \textbf{Fork-Bomb} & \textbf{Host Util. (\%)} & \textbf{Host Util. (\%)} \\
  & \textbf{Blocked (\%)} & \textbf{Syscall} & \textbf{Mount} & \textbf{Default} & \textbf{Cap (64 PIDs)} & \textbf{Unconstrained} & \textbf{Capped (1 CPU)} \\
 \midrule
 Docker (\texttt{runc})        & 8/15 (53.3\%)  & BLOCKED & EXPOSED & 500/500 & 63 (\texttt{EAGAIN}) & 56.95 $\pm$ 1.52 & 83.34 $\pm$ 0.73 \\
@@ -205,44 +212,122 @@ LXC (system)                  & 2/15 (13.3\%)  & EXPOSED & EXPOSED & 500/500 & 4
 \end{tabular}
 \end{table*}
 
-\textbf{Active Escape and Bind-Mount Isolation:} Expanding the audit to 15 tests broke the Phase~1 tie between rootless Podman and gVisor (Fig.~\ref{fig:fig7}). Podman led at 11/15 (73.3\%, 11 capabilities) and was the sole runtime to block \texttt{P15\_BIND\_CANARY\_ROOT}: remapping container UID~0 to host UID~1000 prevented reading the host's \texttt{root:root} \texttt{0600} canary file even when bind-mounted. Under rootful Docker, containerd, gVisor, and LXC, container UID~0 successfully read the canary file. gVisor placed second at 10/15 (66.7\%, 13 capabilities), blocking \texttt{P01}--\texttt{P07}, \texttt{P10}, \texttt{P11}, and \texttt{P13} (\texttt{errno 38}) while exposing a writable virtual \texttt{/proc/sysrq-trigger} (\texttt{P14}, with \texttt{/sys} remaining read-only). Docker and containerd remained identical at 8/15 (53.3\%, 14 capabilities), while default LXC scored 2/15 (13.3\%, 36 capabilities), permitting \texttt{bpf()} map creation (\texttt{P10}) and \texttt{setns()} (\texttt{P11}) in addition to \texttt{mount}, \texttt{unshare}, \texttt{mknod}, and \texttt{keyctl}.
+The 15-probe audit separated Podman and gVisor (Fig.~\ref{fig:fig7}). Rootless Podman ranked first at 11/15 (73.3\%, 11 capabilities) and was the only runtime that blocked \texttt{P15\_BIND\_CANARY\_ROOT}, because container root maps to host UID~1000 and cannot read a host \texttt{root:root} \texttt{0600} file. Under Docker, containerd, gVisor (running via rootful Docker), and LXC, container root read the secret file. gVisor ranked second at 10/15 (66.7\%, 13 capabilities); it uniquely masked the host kernel (\texttt{4.19.0-gvisor}) and blocked \texttt{keyctl()} (\texttt{errno 38}), while exposing a writable \texttt{/proc/sysrq-trigger} (though \texttt{/sys} stayed read-only). Docker and containerd tied again at 8/15 (53.3\%, 14 capabilities). Default LXC scored 2/15 (13.3\%, 36 capabilities), allowing \texttt{bpf()} map creation (\texttt{P10}), \texttt{setns()} (\texttt{P11}), \texttt{mount}, \texttt{unshare}, \texttt{mknod}, and \texttt{keyctl}.
 
-\textbf{Fork-Bomb and CPU Starvation Containment:} Without explicit cgroup limits, all five runtimes allowed the full 500-process fork bomb and suffered severe host CPU degradation under 8-thread contention (55.29\%--58.32\% host utility; Fig.~\ref{fig:fig8}). Enforcing \texttt{pids.max=64} halted the fork bomb via \texttt{EAGAIN} (\texttt{errno 11}) at 63 child processes on Docker, Podman, and containerd, and at 47 child processes on LXC (where internal container processes consume part of the 64-PID quota). On gVisor, \texttt{--pids-limit=64} permitted a 10-process run (\texttt{exit=0}) but terminated the 500-process attempt with exit code~2 and no guest output across all three trials. Applying a 1-CPU cgroup quota restored 4-worker host utility across all five runtimes to 80.51\%--85.00\%, confirming that cgroup v2 enforcement---not runtime selection alone---governs CPU noisy-neighbor containment.
+Without cgroup limits, all five runtimes allowed all 500 fork-bomb processes and slowed the 4-worker CPU host baseline down to 55.29\%--58.32\% utility (Fig.~\ref{fig:fig8}). Adding a 64-PID cap stopped the fork bomb cleanly with \texttt{EAGAIN} (\texttt{errno 11}) at 63 children on Docker, Podman, and containerd, and at 47 children on LXC (where other background processes inside the LXC container used the remaining PID slots). On gVisor, \texttt{--pids-limit=64} allowed a small 10-process run (\texttt{exit=0}) but ended the 500-process run with exit code~2 and no guest output across all 3 trials. Adding a 1-CPU quota raised host CPU utility back to 80.51\%--85.00\% on all five runtimes.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{../results/figures/fig7_escape_matrix_v2.png}
-\caption{15-test active escape and privilege audit matrix and effective capability counts across all five runtimes.}
+\includegraphics[width=\linewidth]{fig7_escape_matrix_v2.png}
+\caption{15-probe active security matrix and capability counts across all five runtimes.}
 \label{fig:fig7}
 \end{figure}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{../results/figures/fig8_forkbomb_and_starvation.png}
-\caption{Fork-bomb process containment (unconstrained vs.\ 64-PID cap) and 8-thread CPU starvation impact on 4-worker host throughput (unconstrained vs.\ 1-CPU cap).}
+\includegraphics[width=\linewidth]{fig8_forkbomb_and_starvation.png}
+\caption{Fork-bomb containment (default vs.\ 64-PID cap) and 8-thread CPU starvation impact (default vs.\ 1-CPU cap).}
 \label{fig:fig8}
 \end{figure}
 
-\subsection{Module 3 Results: Polling vs.\ Kernel eBPF Blue Team}
-\todo{Insert eBPF vs.\ polling MTTD comparison, Gen 1--3 evasion curves, and the final 5-runtime Weighted Decision Matrix.}
+\subsection{Module 3: Polling vs.\ Kernel eBPF and Decision Matrix}
+Table~\ref{tab:m3_ebpf} compares all 135 Phase~1 polling trials against all 135 Module~3 kernel eBPF trials (Fig.~\ref{fig:fig9}), and Fig.~\ref{fig:fig10} shows how Gen~1--3 evasion affected polling detection times.
+
+\begin{table*}[t]
+\centering
+\caption{Module 3 Blue Team Comparison: User-Space Polling (135 Trials) vs.\ Kernel eBPF (135 Trials)}
+\label{tab:m3_ebpf}
+\begin{tabular}{lccccccc}
+\toprule
+\textbf{Runtime} & \textbf{Polling} & \textbf{Polling Resp.} & \textbf{eBPF} & \textbf{eBPF Kernel} & \textbf{eBPF Resp.} & \textbf{Response} & \textbf{Gen 3 Spoof} \\
+ & \textbf{Det. (\%)} & \textbf{(ms)} & \textbf{Det. (\%)} & \textbf{MTTD (ms)} & \textbf{(ms)} & \textbf{Speedup} & \textbf{Caught (\%)} \\
+\midrule
+Docker (\texttt{runc})        & 100.0 & 2,029.3 & \textbf{100.0} & 4.91 & 548.6 & 3.70$\times$ & \textbf{100.0} \\
+Podman (rootless)             & 100.0 & 2,136.8 & \textbf{100.0} & 4.12 & \textbf{544.6} & \textbf{3.92$\times$} & \textbf{100.0} \\
+containerd (\texttt{nerdctl}) & 100.0 & \textbf{1,965.4} & \textbf{100.0} & 5.73 & 956.6 & 2.05$\times$ & \textbf{100.0} \\
+gVisor (\texttt{runsc})       & 66.7  & 5,399.6 & \textbf{0.0}   & ---  & ---   & ---          & \textbf{0.0}   \\
+LXC (system)                  & 100.0 & 2,412.9 & \textbf{100.0} & \textbf{3.08} & 776.6 & 3.11$\times$ & \textbf{100.0} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+On Docker, Podman, containerd, and LXC, kernel eBPF caught 100.0\% of all 108 virus runs, firing in 3.08--5.73~ms after \texttt{run\_virus.sh} started and catching 100.0\% of Gen~3 \texttt{prctl} name-spoofing calls. Total launch-to-kill time dropped 2.05$\times$--3.92$\times$ compared to polling (down to 544.6~ms on Podman and 548.6~ms on Docker). On gVisor, host kernel eBPF detected 0.0\% (0/27) of runs and saw 0.0\% of Gen~3 spoofing calls because guest syscalls stay inside gVisor's user-space Sentry kernel.
+
+Fig.~\ref{fig:fig10} shows the Gen~1 $\rightarrow$ Gen~3 evasion effect under polling: Gen~2/3 slow memory allocation stretched \texttt{mem\_virus} polling MTTD from 227.4--674.3~ms (Gen~1) to 5,354.3--5,740.7~ms on native runtimes and from 858.3~ms to 13,949.1--14,044.7~ms on gVisor. Similarly, \texttt{io\_virus} Gen~2/3 polling MTTD grew from 225.2--284.9~ms to 850.2--998.7~ms on native runtimes (and 0/9 detected on gVisor). With kernel eBPF on shared-kernel runtimes, detection stayed flat at 3.01--7.38~ms across all three viruses and generations.
+
+Table~\ref{tab:m3_matrix} and Fig.~\ref{fig:fig11} show our normalized 0--100 scores and three example weighted deployment profiles: \textit{General / EDR} (30\% Security, 20\% Syscall/IO, 15\% Network, 15\% Efficiency, 20\% Visibility), \textit{High-Throughput} (15\% Security, 25\% Syscall/IO, 35\% Network, 15\% Efficiency, 10\% Visibility), and \textit{Security-First} (55\% Security, 15\% Syscall/IO, 5\% Network, 10\% Efficiency, 15\% Visibility).
+
+\begin{table*}[t]
+\centering
+\caption{Normalized Empirical Scores (0--100) and Example Weighted Deployment Profile Rankings}
+\label{tab:m3_matrix}
+\begin{tabular}{lcccccccc}
+\toprule
+\textbf{Runtime} & \textbf{Security} & \textbf{Syscall \&} & \textbf{Network} & \textbf{Startup \&} & \textbf{Blue Team} & \textbf{General /} & \textbf{High-} & \textbf{Security-} \\
+ & \textbf{(15-Probe)} & \textbf{Disk I/O} & \textbf{(TCP)} & \textbf{RAM Eff.} & \textbf{Visibility} & \textbf{EDR} & \textbf{Throughput} & \textbf{First} \\
+\midrule
+Docker (\texttt{runc})        & 53.3 & 81.2  & \textbf{97.3} & 85.6 & \textbf{100.0} & \textbf{79.7} & \textbf{85.2} & 69.9 \\
+Podman (rootless)             & \textbf{73.3} & \textbf{100.0} & 26.8 & \textbf{88.1} & \textbf{100.0} & 79.2 & 68.6 & \textbf{80.5} \\
+containerd (\texttt{nerdctl}) & 53.3 & 87.4  & 95.6 & 67.4 & \textbf{100.0} & 77.9 & 83.4 & 68.9 \\
+gVisor (\texttt{runsc})       & 66.7 & 14.2  & 24.2 & 43.1 & 33.4  & 39.6 & 31.8 & 49.3 \\
+LXC (system)                  & 13.3 & 91.4  & 70.1 & 51.0 & \textbf{100.0} & 60.4 & 67.0 & 44.6 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig9_ebpf_vs_polling.png}
+\caption{User-space polling vs.\ kernel eBPF detection rates and total response times across all five runtimes (270 total trials).}
+\label{fig:fig9}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig10_gen_evasion_curves.png}
+\caption{Gen~1 $\rightarrow$ Gen~3 detection latency under user-space polling across all five runtimes.}
+\label{fig:fig10}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig11_weighted_decision_matrix.png}
+\caption{Normalized empirical scores (0--100) and weighted rankings across three example deployment profiles.}
+\label{fig:fig11}
+\end{figure}
 
 \section{Discussion}
-% [LIVING NOTES — EXPAND AFTER MODULES 1–3]
+
+\textbf{Why Syscall and Network Speeds Differed:} Module~1 explains the disk I/O gap from Phase~1 and matches earlier gVisor studies~\cite{young2019}. Shared-kernel containers (Docker, Podman, containerd, LXC) run system calls directly on the host kernel, so namespaces and rootless UID mapping added almost no syscall delay (0.78$\times$--1.39$\times$ of Bare Host). gVisor intercepts syscalls in user space through Sentry~\cite{gvisor}, which caused 3.25$\times$--30.68$\times$ higher latency on every tested OS primitive. Networking showed a second trade-off: Docker, containerd, and LXC achieved fast TCP speeds (1,796--1,969~MB/s) and low latency (55.8--119.3~$\mu$s) but allowed raw ICMP sockets (\texttt{SOCK\_RAW}). Podman and gVisor both blocked \texttt{SOCK\_RAW}, but routing packets through user-space networking raised RTT above 264~$\mu$s and cut average throughput to 641.7 and 573.4~MB/s.
+
+\textbf{Rootless UID Mapping vs.\ Application-Kernel Isolation:} Podman and gVisor protect the host in different ways. gVisor hides the real host kernel behind Sentry (\texttt{4.19.0-gvisor}, synthetic \texttt{dmesg}, blocking \texttt{keyctl}). However, because gVisor ran under rootful Docker in our setup, container root still read a bind-mounted host \texttt{root:root} \texttt{0600} file (\texttt{P15}). Rootless Podman blocked that read because container UID~0 maps to unprivileged host UID~1000. Docker and containerd gave identical security scores in both Phase~1 (4/8) and Module~2 (8/15, 14 capabilities) because both use default \texttt{runc} rules. Default rootful LXC (2/15, 36 capabilities, allowing \texttt{bpf()}, \texttt{mount()}, \texttt{unshare()}, and \texttt{setns()}) exposed the widest attack surface~\cite{lin2018}.
+
+\textbf{Cgroups v2 Are Required on Every Runtime:} None of the five runtimes blocked the 500-process fork bomb or prevented 8-thread CPU starvation under default settings (host utility dropped to 55.3\%--58.3\% everywhere). Adding explicit cgroup v2 limits (\texttt{pids.max=64} and 1-CPU quotas) contained both attacks across all five runtimes, bringing host CPU utility back to 80.5\%--85.0\%. Under \texttt{pids.max=64}, the four native runtimes returned \texttt{EAGAIN} cleanly, while gVisor terminated the 500-process sandbox with exit code~2 and no guest output.
+
+\textbf{Security Isolation Can Blind Host Monitors:} On Docker, Podman, containerd, and LXC, kernel eBPF eliminated polling lag and defeated Gen~2/3 evasion (3.08--5.73~ms kernel MTTD, 100\% detection, 100\% Gen~3 spoofing visibility). On gVisor, the same Sentry boundary that shields the host kernel also hid guest \texttt{execve}, \texttt{openat}, and \texttt{prctl} calls from host eBPF (0.0\% detection) and hid \texttt{io\_virus} disk writes from host polling (66.7\% detection). Teams using gVisor therefore cannot rely on standard host-kernel eBPF monitors alone.
+
+\textbf{Limitations:} All tests ran inside a single 4-vCPU VMware VM to keep hardware identical across runtimes; absolute speeds on bare-metal servers could differ. Also, Phase~1 ran on kernel \texttt{7.0.0-38-generic} while Modules~2 and~3 ran on \texttt{7.0.0-43-generic} after a routine OS update, and we tested default runtime configurations rather than custom hardened \texttt{seccomp} profiles or unprivileged LXC.
+
+\section{Conclusion and Recommendations}
+Our measurements across 270 arena trials, 5-trial syscall and network benchmarks, 15 active security probes, and fork-bomb/CPU stress tests show that no single runtime wins in every category. The best choice depends on the workload:
 \begin{itemize}
-    \item \textbf{Architectural Equivalence of Docker and containerd:} Identical 50.0\% probe scores and 14 capabilities confirm both rely on shared OCI \texttt{runc} defaults; differences emerge primarily in CLI/CNI startup overhead and kill latency.
-    \item \textbf{Why Isolation Can Blind Defenders:} gVisor's \texttt{tmpfs} \texttt{/tmp} and Sentry process hiding demonstrate that stronger sandboxes protect host storage/kernels while forcing Blue Teams to adapt telemetry pipelines.
-    \item \todo{Add analysis of syscall nanosecond breakdown, network stack differences (\texttt{netstack} vs.\ \texttt{pasta} vs.\ \texttt{docker0}), cgroup enforcement under starvation, and eBPF visibility limits on gVisor.}
+    \item \textbf{Best for Security-First and Balanced General Use --- Rootless Podman (Security-First: 80.5; General/EDR: 79.2):} Achieved the top 15-probe security score (73.3\%, 11 capabilities), blocked host root bind-mount reads, matched native syscall and disk I/O speed, and kept 100\% polling and eBPF visibility (544.6~ms containment), as long as moderate container-to-host TCP throughput is acceptable.
+    \item \textbf{Best for High-Throughput and Network-Heavy Services --- Docker (High-Throughput: 85.2; General/EDR: 79.7) and containerd (83.4 / 77.9):} Delivered fast TCP networking (55.8--58.9~$\mu$s RTT, 1,796--1,969~MB/s), near-native syscalls, and 100\% eBPF visibility. Operators should still drop unused capabilities (such as \texttt{CAP\_NET\_RAW}) and set cgroup v2 CPU and PID limits.
+    \item \textbf{Best for Untrusted Code Prioritizing Kernel Protection --- gVisor:} Although syscall, disk I/O, network, and host eBPF limits lowered its composite scores (31.8--49.3), gVisor is the only tested runtime that places a user-space kernel between untrusted code and the host Linux kernel.
+    \item \textbf{Legacy Full-OS Workloads Only --- LXC (44.6--67.0):} Fast startup (379.0~ms) and native compute/I/O, but default rootful LXC (13.3\% security score, 36 capabilities, \texttt{bpf()} and \texttt{mount()} open) should not run untrusted code without unprivileged configuration and strict capability limits.
 \end{itemize}
 
-\section{Conclusion and Future Work}
-% [LIVING VERDICT — FINALIZE WITH WEIGHTED DECISION MATRIX]
-Preliminary Phase~1 findings indicate that \textbf{rootless Podman} provides the strongest general-purpose balance of security (87.5\%, 11 capabilities), syscall throughput (134.3~MB/s), low memory footprint (1.6~MB), and full Blue Team visibility, whereas \textbf{gVisor} provides superior kernel-boundary defense for untrusted multi-tenant code at the cost of heavy I/O/memory overhead and reduced host observability. \todo{Finalize deployment recommendations using the full weighted decision matrix across all four experimental phases.}
+Future work can test custom hardened OCI settings (such as \texttt{--cap-drop=ALL} and strict \texttt{seccomp} profiles), evaluate unprivileged LXC, and compare gVisor against microVM runtimes such as Firecracker or Kata Containers.
 
-\begin{thebibliography}{1}
-\bibitem{gvisor} Google, ``gVisor: Application Kernel for Containers,'' \url{https://gvisor.dev/docs/}, 2026.
-\bibitem{podman} Red Hat, ``Podman: Daemonless, Rootless Linux Containers,'' \url{https://podman.io/}, 2026.
-\bibitem{oci} Open Container Initiative, ``OCI Runtime Specification,'' \url{https://opencontainers.org/}, 2026.
-\todo{Add 4--6 peer-reviewed IEEE/USENIX papers on container security, gVisor overhead, and eBPF runtime defense.}
+\begin{thebibliography}{8}
+\bibitem{felter2015} W. Felter, A. Ferreira, R. Rajamony, and J. Rubio, ``An Updated Performance Comparison of Virtual Machines and Linux Containers,'' in \textit{Proc. IEEE Int. Symp. Performance Analysis of Systems and Software (ISPASS)}, 2015, pp. 171--172.
+\bibitem{young2019} E. G. Young, P. Zhu, T. Caraza-Harter, A. C. Arpaci-Dusseau, and R. H. Arpaci-Dusseau, ``The True Cost of Containing: A gVisor Case Study,'' in \textit{Proc. 11th USENIX Workshop on Hot Topics in Cloud Computing (HotCloud '19)}, 2019.
+\bibitem{lin2018} X. Lin, L. Lei, Y. Wang, J. Jing, K. Sun, and Q. Zhou, ``A Measurement Study on Linux Container Security: Attacks and Countermeasures,'' in \textit{Proc. 34th Annual Computer Security Applications Conference (ACSAC '18)}, 2018, pp. 418--429.
+\bibitem{sultan2019} S. Sultan, I. Ahmad, and T. Dimitriou, ``Container Security: Issues, Challenges, and the Road Ahead,'' \textit{IEEE Access}, vol. 7, pp. 52976--52996, 2019.
+\bibitem{gregg2019} B. Gregg, \textit{BPF Performance Tools: Linux System and Application Observability}. Boston, MA, USA: Addison-Wesley Professional, 2019.
+\bibitem{gvisor} Google, ``gVisor: Application Kernel for Containers,'' \url{https://gvisor.dev/docs/}, accessed Nov. 2026.
+\bibitem{podman} Red Hat, ``Podman: Daemonless, Rootless Linux Containers,'' \url{https://podman.io/}, accessed Nov. 2026.
+\bibitem{oci} Open Container Initiative, ``OCI Runtime Specification,'' \url{https://opencontainers.org/}, accessed Nov. 2026.
 \end{thebibliography}
 
 \end{document}
