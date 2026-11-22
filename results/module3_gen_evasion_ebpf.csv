@@ -1,0 +1,10 @@
+virus,gen,docker,podman,containerd,gvisor,lxc
+cpu_virus,1,4.71,4.03,6.05,,3.11
+cpu_virus,2,4.64,3.73,5.13,,3.08
+cpu_virus,3,4.05,3.73,5.35,,3.05
+io_virus,1,4.27,4.47,6.5,,3.08
+io_virus,2,5.25,4.58,5.58,,3.07
+io_virus,3,3.64,4.0,6.03,,3.15
+mem_virus,1,7.38,3.81,6.48,,3.01
+mem_virus,2,5.34,4.36,4.42,,3.12
+mem_virus,3,4.92,4.38,6.03,,3.03

@@ -1,0 +1,30 @@
+BEGIN {
+    printf("READY\n");
+}
+
+tracepoint:sched:sched_process_exec {
+    $f = str(args.filename);
+    if ($f == "/red_team/run_virus.sh") {
+        printf("WRAPPER|%llu|%d|%s|%s\n", nsecs, pid, comm, $f);
+    } else if ($f == "/red_team/cpu_virus" ||
+               $f == "/red_team/mem_virus" ||
+               $f == "/red_team/io_virus") {
+        printf("EXEC|%llu|%d|%s|%s\n", nsecs, pid, comm, $f);
+    }
+}
+
+tracepoint:syscalls:sys_enter_openat {
+    $f = str(args.filename);
+    if (strncmp($f, "/tmp/os_arena", 13) == 0) {
+        printf("OPENAT|%llu|%d|%s|%s\n", nsecs, pid, comm, $f);
+    }
+}
+
+tracepoint:syscalls:sys_enter_prctl /args.option == 15/ {
+    $n = str(args.arg2);
+    if ($n == "kworker/u4:2" ||
+        $n == "systemd-journal" ||
+        $n == "rsyslogd") {
+        printf("PRCTL_SPOOF|%llu|%d|%s|%s\n", nsecs, pid, comm, $n);
+    }
+}
