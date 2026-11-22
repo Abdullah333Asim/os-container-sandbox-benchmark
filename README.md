@@ -1,117 +1,125 @@
-# Evaluating Security Isolation vs. Performance Overhead Across Five Linux Container Runtimes
+# Linux Container Security & Performance Benchmark
 
-An empirical Operating Systems and Cyber Defense benchmark comparing **Docker (`runc`)**, **Podman (rootless)**, **containerd (`nerdctl`)**, **gVisor (`runsc`)**, and **LXC** across out-of-the-box attack surface, resource/syscall overhead, host blast-radius containment, and host-side Blue Team observability under multi-generational Red Team workloads.
+This project compares five Linux container tools (**Docker**, **Podman (rootless)**, **containerd**, **gVisor**, and **LXC**) on the same Ubuntu machine. We test how well each container blocks attacks, how much it slows down the system, and how easily host monitoring tools can catch malware running inside it.
 
 ## Team Members
-- **Muhammad Abdullah Asim**: Runtime infrastructure, 5-container provisioning, image parity, startup/I/O benchmarking
-- **Maaz**: Red Team multi-generational C malware payloads, container security probe suite, orchestration testing
-- **Bilal**: Blue Team host-side monitor/containment daemon, host ground-truth workload, automated analysis & plotting, final report
+- **Muhammad Abdullah Asim**
+- **Maaz Ahmed Siddiqui**
+- **Bilal Sheraz**
+---
+
+## What We Tested
+
+1. **Phase 1 - Baseline & Polling Monitor:** Startup time, idle RAM, small-block disk writes, 8 basic security checks, and 135 attack trials using a host polling monitor (`psutil`).
+2. **Module 1 - System Calls & Network Speed:** Exact time per Linux system call (`getpid`, `open/close`, `pipe`, `mmap`, `fork`) plus container-to-host TCP speed and raw socket (`SOCK_RAW`) blocking.
+3. **Module 2 - Active Security & Stress Limits:** 15 active security checks (including reading a bind-mounted host root file), a 500-process fork bomb, and an 8-thread CPU stress test, both with default settings and with cgroup limits (`64` PIDs and `1` CPU).
+4. **Module 3 - Kernel eBPF Monitor:** Re-ran all 135 attack trials using a kernel-level `bpftrace` monitor to compare it against user-space polling, then ranked all 5 runtimes for different use cases.
 
 ---
 
-## Repository Structure
+## Project Folders
 
 ```text
 os-container-sandbox-benchmark/
-├── setup/
-│   └── install_runtimes.sh       # Automated installer for all 5 container runtimes & Python dependencies
-├── red_team/
-│   ├── Dockerfile                # Builds the identical Ubuntu 24.04 Red Team image used across runtimes
-│   ├── cpu_virus.c               # Gen 1-3 CPU exhaustion, pulsed timing, and process-camouflage payload
-│   ├── mem_virus.c               # Gen 1-3 physical RAM allocation (400 MB) and slow-drip evasion payload
-│   ├── io_virus.c                # Gen 1-3 persistence drop + noisy disk write payload
-│   ├── run_virus.sh              # Container PID-1 wrapper keeping Gen 3 orphaned children alive
-│   └── security_probes.sh        # 8-point safe OS isolation & capability audit suite
-├── blue_team/
-│   ├── host_workload.py          # Benign host CPU + fsync ground-truth workload (measures host utility %)
-│   └── blue_team_monitor.py      # Host-side cgroup/proc telemetry monitor & automated container killer
-├── benchmarks/
-│   └── run_all.sh                # Master 5-phase benchmark orchestrator (5 runtimes x 3 viruses x 3 gens x N trials)
-├── analysis/
-│   └── plot_results.py           # Generates 300-DPI IEEE figures and summary_table.csv from raw CSVs
-└── results/
-    ├── startup_overhead.csv      # Phase 1: Cold-start latency (ms) and idle RAM footprint (MB)
-    ├── io_overhead.csv           # Phase 2: Inside-container syscall-heavy disk write throughput (MB/s)
-    ├── security_probes.csv       # Phase 3: 8-probe security matrix and default capability counts
-    ├── host_baseline.json        # Phase 4: Idle host ground-truth baseline throughput
-    ├── arena_results.csv         # Phase 5: 135-trial Red Team vs. Blue Team telemetry dataset
-    ├── summary_table.csv         # Aggregated comparison table across all 5 runtimes
-    └── figures/                  # Publication-ready PNG figures (Fig. 1 - Fig. 4)
+├── setup/          # Installs all 5 runtimes and builds the shared test image
+├── red_team/       # C malware tests, fork bomb, CPU stress, and security check scripts
+├── microbench/     # C benchmarks for system calls and TCP networking
+├── blue_team/      # Host workload, polling monitor, and kernel eBPF monitor
+├── benchmarks/     # Scripts that run Phase 1, Module 1, and Module 2
+├── analysis/       # Python scripts that build summary tables and Figures 1-11
+├── results/        # All raw CSV data, summary tables, and saved PNG graphs
+└── report/         # IEEE LaTeX report (main.tex) and ready-to-upload overleaf_bundle.zip
 ```
 
 ---
 
-## Prerequisites & Testbed Environment
+## Requirements
 
-- **OS:** Ubuntu 24.04 / 26.04 (64-bit, cgroups v2, native `systemd`; VMware VM recommended over WSL2)
-- **Recommended VM Specs:** 16 GB RAM, 4 vCPUs, 40 GB Disk, NAT networking
+- Ubuntu 24.04 or 26.04 (64-bit, cgroups v2). A VMware VM (4 vCPUs, 16 GB RAM, 40 GB disk) is recommended.
 
 ---
 
-## Step-by-Step Reproduction Guide
+## How to Run the Project
 
-### 1. Clone the Repository
+### 1. Download the Repository
 
 ```bash
 git clone https://github.com/Abdullah333Asim/os-container-sandbox-benchmark.git
 cd os-container-sandbox-benchmark
 ```
 
-### 2. Install All 5 Runtimes & Dependencies
+### 2. Install All 5 Runtimes and `bpftrace`
 
 ```bash
 chmod +x setup/install_runtimes.sh
 ./setup/install_runtimes.sh
+sudo apt-get install -y bpftrace
 sudo systemctl reboot -i
 ```
 
-*(A single reboot ensures your user's `docker` group and rootless `podman` UID/GID mappings initialize cleanly.)*
+*(Reboot once so Docker permissions and rootless Podman user settings take effect.)*
 
-### 3. Build & Load the Identical Red Team Test Image Across All 5 Runtimes
+### 3. Create the LXC Container and Build All Test Programs
+
+This builds one Ubuntu 24.04 container image and copies the exact same compiled C programs into all 5 runtimes and the host:
 
 ```bash
-# Build in Docker (automatically available to Docker and gVisor)
-docker build -t redteam-sandbox:latest red_team/
-
-# Export and load identical image into Podman and containerd (nerdctl)
-docker save redteam-sandbox:latest -o /tmp/redteam-sandbox.tar
-podman load -i /tmp/redteam-sandbox.tar
-sudo nerdctl load -i /tmp/redteam-sandbox.tar
-rm -f /tmp/redteam-sandbox.tar
-
-# Create persistent LXC container and copy compiled /red_team binaries into it
 sudo lxc-create -t download -n redteam-lxc -- -d ubuntu -r noble -a amd64
-docker create --name tmp_extract redteam-sandbox:latest >/dev/null
-docker cp tmp_extract:/red_team /tmp/red_team_extract
-docker rm tmp_extract >/dev/null
-sudo cp -r /tmp/red_team_extract /var/lib/lxc/redteam-lxc/rootfs/red_team
-rm -rf /tmp/red_team_extract
+chmod +x setup/build_images.sh
+./setup/build_images.sh
 ```
 
-### 4. Run the Full 5-Phase Benchmark Suite
+### 4. Run the Tests
 
-Run with `1` for a quick ~3-minute verification, or `3` for the full 135-trial dataset (~8 minutes):
+You can run all four stages in order (pass `1` instead of `3` or `5` for a quick test run):
 
 ```bash
+# Phase 1: Baseline + 135 polling monitor trials (~8 min)
 sudo ./benchmarks/run_all.sh 3
+
+# Module 1: System call and TCP network benchmarks, 5 trials (~2 min)
+sudo ./benchmarks/run_module1.sh 5
+
+# Module 2: 15 security checks, fork bomb, and CPU stress, 3 trials (~5 min)
+sudo ./benchmarks/run_module2.sh 3
+
+# Module 3: 135 kernel eBPF monitor trials (~3 min)
+sudo python3 blue_team/ebpf_arena.py --trials 3 --timeout 4.0 --out results/module3_ebpf_arena.csv
 ```
 
-### 5. Generate Summary Table & Figures
+### 5. Generate All Tables and Figures
 
 ```bash
 python3 analysis/plot_results.py
+python3 analysis/plot_module1.py
+python3 analysis/plot_module2.py
+python3 analysis/plot_module3.py
 ```
 
-Outputs are saved to `results/summary_table.csv` and `results/figures/fig1_*.png` through `fig4_*.png`.
+All graphs (`fig1` through `fig11`) are saved in `results/figures/`.
 
 ---
 
-## Summary of Key Empirical Findings (3-Trial Dataset)
+## Summary of Results
 
-| Runtime | Security Score | Default Caps | Startup (ms) | Idle RAM (MB) | Syscall I/O (MB/s) | Detection Rate | Mean Response (ms) | Host Utility | Inner PIDs Visible |
+| Runtime | 15-Probe Security | Capabilities | Startup (ms) | Idle RAM (MB) | Disk I/O (MB/s) | TCP Speed (MB/s) | Polling Catch Rate | eBPF Catch Rate | eBPF Kill Time (ms) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **Docker (`runc`)** | 50.0% (4/8) | 14 | 532.7 | 1.5 | 92.0 | 100.0% | 2029.3 | 97.0% | Yes |
-| **Podman (rootless)** | **87.5% (7/8)** | **11** | 460.0 | 1.6 | **134.3** | 100.0% | 2136.8 | **99.9%** | Yes |
-| **containerd (`nerdctl`)** | 50.0% (4/8) | 14 | 924.0 | 1.6 | 107.3 | 100.0% | **1965.4** | 99.0% | Yes |
-| **gVisor (`runsc`)** | **87.5% (7/8)** | 13 | 456.3 | 46.5 | 24.0 | 66.7% | 5399.6 | 97.8% | **No** |
-| **LXC (system)** | 12.5% (1/8) | 36 | **379.0** | 78.8 | 113.8 | 100.0% | 2412.9 | 99.3% | Yes |
+| **Docker** | 8/15 (53.3%) | 14 | 532.7 | **1.5** | 92.0 | **1,968.7** | 100.0% | 100.0% | 548.6 |
+| **Podman (rootless)** | **11/15 (73.3%)** | **11** | 460.0 | 1.6 | **134.3** | 641.7 | 100.0% | 100.0% | **544.6** |
+| **containerd** | 8/15 (53.3%) | 14 | 924.0 | 1.6 | 107.3 | 1,796.0 | 100.0% | 100.0% | 956.6 |
+| **gVisor** | 10/15 (66.7%) | 13 | 456.3 | 46.5 | 24.0 | 573.4 | 66.7% | 0.0% | N/A |
+| **LXC** | 2/15 (13.3%) | 36 | **379.0** | 78.8 | 113.8 | 1,840.5 | 100.0% | 100.0% | 776.6 |
+
+### Main Takeaways
+
+- **Best for security + everyday use: Rootless Podman.** Highest security score (11/15), only runtime that blocked reading a bind-mounted host root file, fast disk I/O, and 100% visibility for both monitors. Its TCP networking is slower than Docker and containerd, though.
+- **Best for high-speed networking: Docker & containerd.** Fastest TCP transfers (1,796-1,969 MB/s) and near-native system calls, with 100% eBPF visibility. Both need extra hardening (dropping capabilities and setting cgroup limits).
+- **Best for isolating untrusted code from the host kernel: gVisor.** Strong kernel separation, but much slower on system calls (3.25x-30.68x) and disk I/O (24.0 MB/s), and it hides container activity from host eBPF monitors (0% detected).
+- **Cgroup limits matter everywhere.** With default settings, all 5 runtimes allowed all 500 fork-bomb processes and let an 8-thread stress attack cut host CPU speed almost in half (55%-58%). Adding cgroup limits fixed both issues across every runtime.
+- **Avoid default rootful LXC for untrusted code.** Scored lowest on security (2/15, 36 capabilities open, including `mount` and `bpf`).
+
+---
+
+## Report
+
+The full IEEE paper is in `report/main.tex`. To view or compile it directly in Overleaf without manual setup, upload `report/overleaf_bundle.zip` (which already includes `main.tex` and all 11 figures).
