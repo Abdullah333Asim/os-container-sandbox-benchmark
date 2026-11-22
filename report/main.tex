@@ -62,7 +62,12 @@ To isolate low-level operating system overhead from application logic, we compil
 \end{itemize}
 
 \subsection{Module 2: Starvation, Fork-Bomb, and Active Escape Suite v2}
-\todo{Describe 4-thread CPU/RAM starvation (\texttt{stress\_virus.c}), capped \texttt{fork\_bomb.c} (unconstrained vs.\ cgroup v2 caps), and the 15-test Active Escape Suite v2 across all 5 runtimes.}
+To evaluate active privilege boundaries and concurrency blast radius under uniform configurations (Linux kernel \texttt{7.0.0-43-generic}), we executed three additional tests across all five runtimes:
+\begin{itemize}
+    \item \textbf{15-Test Active Escape and Privilege Audit (\texttt{escape\_suite\_v2.sh}, \texttt{escape\_helper.c}):} Extends the 8-point baseline audit to 15 active checks by adding C syscall probes for \texttt{ptrace(PTRACE\_ATTACH)} (\texttt{P09}), \texttt{bpf(BPF\_MAP\_CREATE)} with a minimal \texttt{BPF\_MAP\_TYPE\_ARRAY} descriptor (\texttt{P10}), \texttt{setns()} on \texttt{/proc/self/ns/mnt} (\texttt{P11}), \texttt{chroot("/tmp")} (\texttt{P12}), \texttt{keyctl()} (\texttt{P13}), write-access checks on \texttt{/proc/sysrq-trigger} and \texttt{/sys} (\texttt{P14}), and a misconfigured read-only bind-mount test exposing a host \texttt{root:root} (\texttt{0600}) canary file at \texttt{/host\_canary/host\_secret.txt} (\texttt{P15}).
+    \item \textbf{Capped Fork-Bomb Containment (\texttt{fork\_bomb.c}):} Attempts to spawn 500 concurrent child processes, holds them for 0.5~s, and terminates/reaps all children. Each runtime was tested for 3 trials under unconstrained defaults and under a 64-PID cgroup v2 cap (\texttt{--pids-limit=64} or \texttt{lxc-cgroup pids.max 64}).
+    \item \textbf{8-Thread CPU Starvation (\texttt{stress\_virus.c}):} Launches 8 POSIX threads burning integer loops for 10~s while a 4-worker CPU-only host workload (\texttt{host\_workload.py --cpu-only --workers 4}, idle baseline 238.99~ops/s, mean loop 16.76~ms) measures host throughput over the middle 6~s across 3 trials—comparing unconstrained containers against 1-CPU cgroup v2 quotas (\texttt{--cpus=1} or \texttt{cpu.max "100000 100000"}).
+\end{itemize}
 
 \subsection{Module 3: Dual Blue Team Architecture (Polling vs.\ eBPF)}
 \todo{Describe kernel-level \texttt{bpftrace}/eBPF tracing (\texttt{execve}, \texttt{clone}, \texttt{openat}, \texttt{mount}) compared directly against user-space cgroup polling across all 5 runtimes.}
@@ -180,7 +185,43 @@ LXC        & 119.33 $\pm$ 16.19 & 1840.48 $\pm$ 176.29 & EXPOSED \\
 \end{figure}
 
 \subsection{Module 2 Results: Concurrency Starvation and Escape Matrix v2}
-\todo{Insert unconstrained vs.\ cgroup-capped Host Utility drop under 4-thread starvation/fork-bomb and 15-test Active Escape Matrix across all 5 runtimes.}
+Table~\ref{tab:m2_summary} summarizes the verified Module~2 outcomes across all five runtimes, with detailed breakdowns in Fig.~\ref{fig:fig7} and Fig.~\ref{fig:fig8}.
+
+\begin{table*}[t]
+\centering
+\caption{Module 2 Active Escape Audit (15 Probes), Fork-Bomb Containment, and 8-Thread CPU Starvation (Mean $\pm$ Std, 3 Trials)}
+\label{tab:m2_summary}
+\begin{tabular}{lccccccc}
+\toprule
+\textbf{Runtime} & \textbf{Escape Score} & \textbf{\texttt{P10} \texttt{bpf()}} & \textbf{\texttt{P15} Canary} & \textbf{Fork-Bomb} & \textbf{Fork-Bomb} & \textbf{Host Util. (\%)} & \textbf{Host Util. (\%)} \\
+ & \textbf{Blocked (\%)} & \textbf{Syscall} & \textbf{Mount} & \textbf{Default} & \textbf{Cap (64 PIDs)} & \textbf{Unconstrained} & \textbf{Capped (1 CPU)} \\
+\midrule
+Docker (\texttt{runc})        & 8/15 (53.3\%)  & BLOCKED & EXPOSED & 500/500 & 63 (\texttt{EAGAIN}) & 56.95 $\pm$ 1.52 & 83.34 $\pm$ 0.73 \\
+Podman (rootless)             & \textbf{11/15 (73.3\%)} & BLOCKED & \textbf{BLOCKED} & 500/500 & 63 (\texttt{EAGAIN}) & 56.39 $\pm$ 0.56 & 82.59 $\pm$ 0.27 \\
+containerd (\texttt{nerdctl}) & 8/15 (53.3\%)  & BLOCKED & EXPOSED & 500/500 & 63 (\texttt{EAGAIN}) & 58.32 $\pm$ 0.32 & 80.51 $\pm$ 3.78 \\
+gVisor (\texttt{runsc})       & 10/15 (66.7\%) & BLOCKED & EXPOSED & 500/500 & Exit 2 (no output)   & 55.52 $\pm$ 2.29 & \textbf{85.00 $\pm$ 0.53} \\
+LXC (system)                  & 2/15 (13.3\%)  & EXPOSED & EXPOSED & 500/500 & 47 (\texttt{EAGAIN}) & 55.29 $\pm$ 2.82 & 83.84 $\pm$ 1.93 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\textbf{Active Escape and Bind-Mount Isolation:} Expanding the audit to 15 tests broke the Phase~1 tie between rootless Podman and gVisor (Fig.~\ref{fig:fig7}). Podman led at 11/15 (73.3\%, 11 capabilities) and was the sole runtime to block \texttt{P15\_BIND\_CANARY\_ROOT}: remapping container UID~0 to host UID~1000 prevented reading the host's \texttt{root:root} \texttt{0600} canary file even when bind-mounted. Under rootful Docker, containerd, gVisor, and LXC, container UID~0 successfully read the canary file. gVisor placed second at 10/15 (66.7\%, 13 capabilities), blocking \texttt{P01}--\texttt{P07}, \texttt{P10}, \texttt{P11}, and \texttt{P13} (\texttt{errno 38}) while exposing a writable virtual \texttt{/proc/sysrq-trigger} (\texttt{P14}, with \texttt{/sys} remaining read-only). Docker and containerd remained identical at 8/15 (53.3\%, 14 capabilities), while default LXC scored 2/15 (13.3\%, 36 capabilities), permitting \texttt{bpf()} map creation (\texttt{P10}) and \texttt{setns()} (\texttt{P11}) in addition to \texttt{mount}, \texttt{unshare}, \texttt{mknod}, and \texttt{keyctl}.
+
+\textbf{Fork-Bomb and CPU Starvation Containment:} Without explicit cgroup limits, all five runtimes allowed the full 500-process fork bomb and suffered severe host CPU degradation under 8-thread contention (55.29\%--58.32\% host utility; Fig.~\ref{fig:fig8}). Enforcing \texttt{pids.max=64} halted the fork bomb via \texttt{EAGAIN} (\texttt{errno 11}) at 63 child processes on Docker, Podman, and containerd, and at 47 child processes on LXC (where internal container processes consume part of the 64-PID quota). On gVisor, \texttt{--pids-limit=64} permitted a 10-process run (\texttt{exit=0}) but terminated the 500-process attempt with exit code~2 and no guest output across all three trials. Applying a 1-CPU cgroup quota restored 4-worker host utility across all five runtimes to 80.51\%--85.00\%, confirming that cgroup v2 enforcement---not runtime selection alone---governs CPU noisy-neighbor containment.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{../results/figures/fig7_escape_matrix_v2.png}
+\caption{15-test active escape and privilege audit matrix and effective capability counts across all five runtimes.}
+\label{fig:fig7}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{../results/figures/fig8_forkbomb_and_starvation.png}
+\caption{Fork-bomb process containment (unconstrained vs.\ 64-PID cap) and 8-thread CPU starvation impact on 4-worker host throughput (unconstrained vs.\ 1-CPU cap).}
+\label{fig:fig8}
+\end{figure}
 
 \subsection{Module 3 Results: Polling vs.\ Kernel eBPF Blue Team}
 \todo{Insert eBPF vs.\ polling MTTD comparison, Gen 1--3 evasion curves, and the final 5-runtime Weighted Decision Matrix.}
