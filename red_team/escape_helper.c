@@ -40,8 +40,12 @@ int main(int argc, char *argv[]) {
     }
 
     if (strcmp(test, "bpf") == 0) {
-        char attr[128];
+        unsigned int attr[32];
         memset(attr, 0, sizeof(attr));
+        attr[0] = 2; /* BPF_MAP_TYPE_ARRAY */
+        attr[1] = 4; /* key_size */
+        attr[2] = 4; /* value_size */
+        attr[3] = 1; /* max_entries */
         long rc = syscall(SYS_bpf, 0, attr, sizeof(attr));
         if (rc >= 0) {
             close((int)rc);

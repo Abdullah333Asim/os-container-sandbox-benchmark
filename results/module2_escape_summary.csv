@@ -1,0 +1,6 @@
+runtime,blocked_count,total_probes,score_pct,cap_count
+docker,8,15,53.3,14
+podman,11,15,73.3,11
+containerd,8,15,53.3,14
+gvisor,10,15,66.7,13
+lxc,2,15,13.3,36

@@ -1,0 +1,11 @@
+runtime,mode,spawned_mean,spawned_std,exit_code_mode,outcome
+containerd,capped_64pids,63.0,0.0,0,CAPPED_EAGAIN
+containerd,unconstrained,500.0,0.0,0,UNCONSTRAINED_FULL
+docker,capped_64pids,63.0,0.0,0,CAPPED_EAGAIN
+docker,unconstrained,500.0,0.0,0,UNCONSTRAINED_FULL
+gvisor,capped_64pids,,0.0,2,SANDBOX_EXIT_2
+gvisor,unconstrained,500.0,0.0,0,UNCONSTRAINED_FULL
+lxc,capped_64pids,47.0,0.0,0,CAPPED_EAGAIN
+lxc,unconstrained,500.0,0.0,0,UNCONSTRAINED_FULL
+podman,capped_64pids,63.0,0.0,0,CAPPED_EAGAIN
+podman,unconstrained,500.0,0.0,0,UNCONSTRAINED_FULL

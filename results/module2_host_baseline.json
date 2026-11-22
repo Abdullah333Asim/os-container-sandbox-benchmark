@@ -1,0 +1,9 @@
+{
+  "workers": 4,
+  "iterations": 1436,
+  "elapsed_sec": 6.014,
+  "mean_ms": 16.76,
+  "median_ms": 13.63,
+  "max_ms": 34.34,
+  "throughput_ops_sec": 238.99
+}
