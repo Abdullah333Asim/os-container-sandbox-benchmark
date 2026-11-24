@@ -1,4 +1,4 @@
-,Security_Isolation,Syscall_Disk_IO,Network_Perf,Startup_RAM_Eff,BlueTeam_Obs,General_EDR,High_Throughput,Security_First
+,Security_Isolation,Syscall_Disk_IO,Network_Perf,Startup_RAM_Eff,Host_Visibility,General_Monitored,High_Throughput,Security_First
 docker,53.3,81.2,97.3,85.6,100.0,79.7,85.2,69.9
 podman,73.3,100.0,26.8,88.1,100.0,79.2,68.6,80.5
 containerd,53.3,87.4,95.6,67.4,100.0,77.9,83.4,68.9

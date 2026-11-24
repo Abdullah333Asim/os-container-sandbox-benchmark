@@ -3,6 +3,7 @@ import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+plt.rcParams["axes.ymargin"] = 0.16
 
 os.makedirs("results/figures", exist_ok=True)
 
@@ -50,7 +51,7 @@ fig, ax1 = plt.subplots(figsize=(7.5, 4.2))
 x = np.arange(len(ORDER))
 bars = ax1.bar(x, sec_vals, width=0.52, color="#d0d7de", edgecolor="#24292f", linewidth=1.0, label="Security Isolation Score (%)")
 ax1.set_ylabel("Security Isolation Score (%)", color="#24292f")
-ax1.set_ylim(0, 110)
+ax1.set_ylim(0, 128)
 ax1.set_xticks(x)
 ax1.set_xticklabels([LABELS[rt] for rt in ORDER])
 
@@ -66,7 +67,7 @@ ax2.set_ylim(0, max(st_mean.values) * 1.28)
 lines1, labels1 = ax1.get_legend_handles_labels()
 lines2, labels2 = ax2.get_legend_handles_labels()
 ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper right", frameon=True)
-plt.title("Fig. 1. Security Isolation Score vs. Container Cold-Start Latency")
+plt.title("Security Isolation Score vs. Container Cold-Start Latency")
 fig.tight_layout()
 plt.savefig("results/figures/fig1_isolation_vs_startup.png", dpi=300)
 plt.close()
@@ -94,7 +95,7 @@ ax2.set_xticklabels([LABELS[rt] for rt in ORDER], fontsize=8.5)
 for i, v in enumerate(io_mean.values):
     ax2.text(i, v + max(io_mean.values)*0.02, f"{v:.1f}", ha="center", va="bottom", fontsize=8.5)
 
-fig.suptitle("Fig. 2. Runtime Resource Footprint & Filesystem I/O Overhead", y=1.01)
+fig.suptitle("Runtime Resource Footprint & Filesystem I/O Overhead", y=1.01)
 fig.tight_layout()
 plt.savefig("results/figures/fig2_resource_io_overhead.png", dpi=300, bbox_inches="tight")
 plt.close()
@@ -129,13 +130,13 @@ for i in range(len(probe_order)):
         txt = "BLOCKED" if mat[i, j] == 1.0 else "EXPOSED"
         ax.text(j, i, txt, ha="center", va="center", color="black", fontsize=8.5, fontweight="bold")
 
-plt.title("Fig. 3. Out-of-the-Box Security Isolation Probe Matrix")
+plt.title("Out-of-the-Box Security Isolation Probe Matrix")
 fig.tight_layout()
 plt.savefig("results/figures/fig3_security_probe_heatmap.png", dpi=300)
 plt.close()
 
 # ----------------------------------------------------------------
-# FIG 4: Blue Team Response Time & Benign Host Utility Under Attack
+# FIG 4: Polling Monitor Response Time & Benign Host Utility Under Attack
 # ----------------------------------------------------------------
 det_df = arena[arena["detected"] == True]
 resp_by_virus = det_df.pivot_table(index="runtime", columns="virus", values="total_response_ms", aggfunc="mean").reindex(ORDER)
@@ -149,7 +150,7 @@ vcolors = ["#2b5c8f", "#e67e22", "#27ae60"]
 for idx, vc in enumerate(vcols):
     vals = resp_by_virus[vc].fillna(0).values if vc in resp_by_virus.columns else np.zeros(len(ORDER))
     ax1.bar(x + (idx - 1)*w, vals, width=w, label=vc, color=vcolors[idx], edgecolor="black", linewidth=0.6)
-ax1.set_title("(a) Blue Team Response Time (Detected Trials)")
+ax1.set_title("(a) Polling Monitor Response Time (Detected Trials)")
 ax1.set_ylabel("MTTD + Containment Time (ms)")
 ax1.set_xticks(x)
 ax1.set_xticklabels([LABELS[rt] for rt in ORDER], fontsize=8.5)
@@ -165,7 +166,7 @@ ax2.set_xticks(x)
 ax2.set_xticklabels([LABELS[rt] for rt in ORDER], fontsize=8.5)
 ax2.legend(fontsize=8.5, loc="lower right")
 
-fig.suptitle("Fig. 4. Blue Team Containment Latency, Detection Rate & Host Blast-Radius", y=1.01)
+fig.suptitle("Polling Monitor Containment Time, Detection Rate & Host Utility", y=1.01)
 fig.tight_layout()
 plt.savefig("results/figures/fig4_blueteam_and_host_utility.png", dpi=300, bbox_inches="tight")
 plt.close()

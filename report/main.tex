@@ -70,7 +70,7 @@ Module~1 measured everyday container overhead and tested how well a simple timer
 \end{itemize}
 
 \subsection{Module 2: System Call and Network Benchmarks}
-To understand *why* runtimes differed in speed and network safety, we wrote two C benchmarks and ran 5 trials on each runtime and on the bare host:
+To understand \textit{why} runtimes differed in speed and network safety, we wrote two C benchmarks and ran 5 trials on each runtime and on the bare host:
 \begin{itemize}
     \item \textbf{System Call Benchmark (\texttt{syscall\_bench.c}):} Measured the average time per call for five common Linux operations: reading a process ID (\texttt{getpid}), opening and closing \texttt{/dev/null}, sending 1~byte through a \texttt{pipe}, mapping and touching a 4~KB memory page (\texttt{mmap} + write + \texttt{munmap}), and creating and waiting for a child process (\texttt{fork} + \texttt{waitpid}).
     \item \textbf{Network Benchmark (\texttt{net\_bench.c}):} Connected each container to a TCP server running on the host (on port 18888) to measure round-trip time (RTT) over 1,000 small 64-byte packets and bulk transfer speed over a 32~MB stream. It also tested whether the container could open a raw ICMP socket (\texttt{SOCK\_RAW}). Raw sockets let programs craft custom low-level network packets, which attackers can abuse for packet spoofing or sniffing.

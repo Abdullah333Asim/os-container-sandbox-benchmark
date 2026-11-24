@@ -30,7 +30,6 @@ plt.rcParams.update({
     "figure.dpi": 300,
 })
 
-# Load verified datasets
 poll_df = pd.read_csv("results/arena_results.csv")
 ebpf_df = pd.read_csv("results/module3_ebpf_arena.csv")
 p1_sum = pd.read_csv("results/summary_table.csv", index_col=0).reindex(ORDER)
@@ -38,9 +37,7 @@ m1_sys = pd.read_csv("results/module1_syscall_summary.csv", index_col=0).reindex
 m1_net = pd.read_csv("results/module1_net_summary.csv", index_col=0).reindex(ORDER)
 m2_esc = pd.read_csv("results/module2_escape_summary.csv", index_col=0).reindex(ORDER)
 
-# ----------------------------------------------------------------
 # 1. Polling vs. eBPF Comparison Summary + FIG 9
-# ----------------------------------------------------------------
 comp_rows = []
 for rt in ORDER:
     p_sub = poll_df[poll_df["runtime"] == rt]
@@ -69,16 +66,16 @@ comp_df = pd.DataFrame(comp_rows).set_index("runtime").reindex(ORDER)
 comp_df["resp_speedup_x"] = (comp_df["poll_resp_ms"] / comp_df["ebpf_resp_ms"]).round(2)
 comp_df.to_csv("results/module3_blueteam_comparison.csv")
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.2, 4.4))
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.8, 4.5))
 x = np.arange(len(ORDER))
-w = 0.36
+w = 0.38
 
 ax1.bar(x - w/2, comp_df["poll_det_pct"], width=w, color="#2980b9", edgecolor="black", linewidth=0.7, label="User-Space Polling (psutil)")
 ax1.bar(x + w/2, comp_df["ebpf_det_pct"], width=w, color="#27ae60", edgecolor="black", linewidth=0.7, label="Kernel eBPF (bpftrace)")
 ax1.set_xticks(x)
 ax1.set_xticklabels([LABELS[r] for r in ORDER], fontsize=8.5)
 ax1.set_ylabel("Detection Rate (%) — 27 Trials per Runtime")
-ax1.set_title("(a) Malware Detection Rate: Polling vs. Kernel eBPF")
+ax1.set_title("(a) Attack Detection Rate: Polling vs. Kernel eBPF")
 ax1.set_ylim(0, 118)
 ax1.grid(axis="y", linestyle="--", alpha=0.35)
 ax1.legend(fontsize=8.3, loc="lower left")
@@ -86,8 +83,10 @@ ax1.legend(fontsize=8.3, loc="lower left")
 for i in range(len(ORDER)):
     pv = comp_df["poll_det_pct"].iloc[i]
     ev = comp_df["ebpf_det_pct"].iloc[i]
-    ax1.text(i - w/2, pv + 2, f"{pv:.1f}%", ha="center", va="bottom", fontsize=7.8, fontweight="bold")
-    ax1.text(i + w/2, ev + 2, f"{ev:.1f}%", ha="center", va="bottom", fontsize=7.8, fontweight="bold",
+    pv_txt = "100%" if pv == 100.0 else f"{pv:.1f}%"
+    ev_txt = "100%" if ev == 100.0 else ("0%" if ev == 0.0 else f"{ev:.1f}%")
+    ax1.text(i - w/2, pv + 2, pv_txt, ha="center", va="bottom", fontsize=7.8, fontweight="bold")
+    ax1.text(i + w/2, ev + 2, ev_txt, ha="center", va="bottom", fontsize=7.8, fontweight="bold",
              color="#922b21" if ev == 0 else "black")
 
 poll_r = comp_df["poll_resp_ms"].fillna(0).values
@@ -112,14 +111,12 @@ for i, rt in enumerate(ORDER):
     else:
         ax2.text(i + w/2, ev + 90, f"{ev:.0f}\n({sp:.1f}x)", ha="center", va="bottom", fontsize=7.6, fontweight="bold", color="#1e8449")
 
-fig.suptitle("Fig. 9. Dual Blue Team Showdown Across Five Runtimes (135 Polling vs. 135 eBPF Trials)", y=1.01)
+fig.suptitle("Host Monitor Comparison Across Five Runtimes (135 Polling vs. 135 eBPF Trials)", y=1.01)
 fig.tight_layout()
-plt.savefig("results/figures/fig9_ebpf_vs_polling.png", dpi=300, bbox_inches="tight")
+plt.savefig("results/figures/fig9_ebpf_vs_polling.png", dpi=300, bbox_inches="tight", pad_inches=0.15)
 plt.close()
 
-# ----------------------------------------------------------------
-# 2. Gen 1 vs. Gen 2 vs. Gen 3 Evasion Curves + FIG 10
-# ----------------------------------------------------------------
+# 2. Stealth Level 1 -> Level 3 Evasion Curves + FIG 10
 gen_poll = poll_df[poll_df["detected"] == True].pivot_table(
     index=["virus", "gen"], columns="runtime", values="mttd_ms", aggfunc="mean"
 ).reindex(columns=ORDER)
@@ -130,10 +127,10 @@ gen_ebpf = ebpf_df[ebpf_df["detected"] == True].pivot_table(
 ).reindex(columns=ORDER)
 gen_ebpf.round(2).to_csv("results/module3_gen_evasion_ebpf.csv")
 
-fig, axes = plt.subplots(1, 3, figsize=(12.2, 4.0), sharey=False)
-viruses = [("cpu_virus", "(a) CPU Virus (Polling MTTD)"),
-           ("mem_virus", "(b) Memory Virus (Polling MTTD)"),
-           ("io_virus", "(c) Disk I/O Virus (Polling MTTD)")]
+fig, axes = plt.subplots(1, 3, figsize=(12.2, 4.1), sharey=False)
+viruses = [("cpu_virus", "(a) CPU Attack (Polling MTTD)"),
+           ("mem_virus", "(b) Memory Attack (Polling MTTD)"),
+           ("io_virus", "(c) Disk I/O Attack (Polling MTTD)")]
 markers = ["o", "s", "^", "D", "v"]
 
 for ax, (vname, title) in zip(axes, viruses):
@@ -148,30 +145,24 @@ for ax, (vname, title) in zip(axes, viruses):
             )
     ax.set_title(title, fontsize=10.2)
     ax.set_xticks([1, 2, 3])
-    ax.set_xticklabels(["Gen 1\n(Baseline)", "Gen 2\n(Stealth)", "Gen 3\n(Camouflage)"], fontsize=8.5)
+    ax.set_xticklabels(["Level 1\n(Baseline)", "Level 2\n(Stealth)", "Level 3\n(Camouflage)"], fontsize=8.5)
     ax.grid(True, linestyle="--", alpha=0.35)
     if vname == "cpu_virus":
         ax.set_ylabel("Polling MTTD (ms, Mean ± Std)")
     if vname == "io_virus":
-        ax.text(2.0, ax.get_ylim()[1] * 0.85, "gVisor: 0/9 detected\n(tmpfs /tmp blind spot)",
-                ha="center", va="top", fontsize=7.8, color="#922b21",
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="#fdecea", edgecolor="#c0392b", alpha=0.9))
+        ax.text(2.22, 430, "gVisor: 0/9 detected\n(no host disk write burst)",
+                ha="center", va="center", fontsize=8.0, color="#922b21",
+                bbox=dict(boxstyle="round,pad=0.35", facecolor="#fdecea", edgecolor="#c0392b", alpha=0.95))
 
 handles, labels = axes[0].get_legend_handles_labels()
 fig.legend(handles, labels, loc="lower center", ncol=5, bbox_to_anchor=(0.5, -0.06), frameon=True, fontsize=8.8)
-fig.suptitle("Fig. 10. Multi-Generational Evasion Curves Under User-Space Polling (Gen 1 → Gen 3)", y=1.01)
+fig.suptitle("Detection Latency Across Stealth Levels Under User-Space Polling (Level 1 → Level 3)", y=1.01)
 fig.tight_layout()
-plt.savefig("results/figures/fig10_gen_evasion_curves.png", dpi=300, bbox_inches="tight")
+plt.savefig("results/figures/fig10_gen_evasion_curves.png", dpi=300, bbox_inches="tight", pad_inches=0.15)
 plt.close()
 
-# ----------------------------------------------------------------
 # 3. Transparent 5-Dimension Weighted Decision Matrix + FIG 11
-# ----------------------------------------------------------------
-# All 5 dimensions normalized strictly from empirical CSV measurements onto [0, 100]:
-# D1. Security Isolation: exact 15-probe blocked percentage (module2_escape_summary.csv)
 d1_sec = m2_esc["score_pct"]
-
-# D2. Syscall & Disk I/O Speed: 50% inverse syscall geometric-mean slowdown + 50% normalized disk I/O
 sys_cols = ["getpid_vs_host_x", "open_close_vs_host_x", "pipe_rw_vs_host_x",
             "mmap_fault_unmap_vs_host_x", "fork_wait_vs_host_x"]
 sys_geomean = np.exp(np.log(m1_sys[sys_cols]).mean(axis=1))
@@ -179,17 +170,14 @@ sys_score = (sys_geomean.min() / sys_geomean) * 100.0
 io_score = (p1_sum["Disk_IO_MB_s"] / p1_sum["Disk_IO_MB_s"].max()) * 100.0
 d2_sysio = 0.5 * sys_score + 0.5 * io_score
 
-# D3. Network Performance: 50% normalized TCP throughput + 50% inverse normalized TCP RTT
 net_tp = (m1_net["tcp_mb_s_mean"] / m1_net["tcp_mb_s_mean"].max()) * 100.0
 net_rtt = (m1_net["tcp_rtt_us_mean"].min() / m1_net["tcp_rtt_us_mean"]) * 100.0
 d3_net = 0.5 * net_tp + 0.5 * net_rtt
 
-# D4. Resource Efficiency (Startup & RAM): 50% inverse startup + 50% inverse idle RAM
 st_score = (p1_sum["Startup_ms"].min() / p1_sum["Startup_ms"]) * 100.0
 ram_score = (p1_sum["Idle_RAM_MB"].min() / p1_sum["Idle_RAM_MB"]) * 100.0
 d4_eff = 0.5 * st_score + 0.5 * ram_score
 
-# D5. Blue Team Observability: 50% Polling Detection (%) + 50% eBPF Detection (%)
 d5_obs = 0.5 * comp_df["poll_det_pct"] + 0.5 * comp_df["ebpf_det_pct"]
 
 dims = pd.DataFrame({
@@ -197,14 +185,13 @@ dims = pd.DataFrame({
     "Syscall_Disk_IO": d2_sysio.round(1),
     "Network_Perf": d3_net.round(1),
     "Startup_RAM_Eff": d4_eff.round(1),
-    "BlueTeam_Obs": d5_obs.round(1),
+    "Host_Visibility": d5_obs.round(1),
 }, index=ORDER)
 
-# Three weighted deployment profiles (weights sum to 1.00)
 profiles = {
-    "General_EDR":        {"Security_Isolation": 0.30, "Syscall_Disk_IO": 0.20, "Network_Perf": 0.15, "Startup_RAM_Eff": 0.15, "BlueTeam_Obs": 0.20},
-    "High_Throughput":    {"Security_Isolation": 0.15, "Syscall_Disk_IO": 0.25, "Network_Perf": 0.35, "Startup_RAM_Eff": 0.15, "BlueTeam_Obs": 0.10},
-    "Security_First":     {"Security_Isolation": 0.55, "Syscall_Disk_IO": 0.15, "Network_Perf": 0.05, "Startup_RAM_Eff": 0.10, "BlueTeam_Obs": 0.15},
+    "General_Monitored": {"Security_Isolation": 0.30, "Syscall_Disk_IO": 0.20, "Network_Perf": 0.15, "Startup_RAM_Eff": 0.15, "Host_Visibility": 0.20},
+    "High_Throughput":   {"Security_Isolation": 0.15, "Syscall_Disk_IO": 0.25, "Network_Perf": 0.35, "Startup_RAM_Eff": 0.15, "Host_Visibility": 0.10},
+    "Security_First":    {"Security_Isolation": 0.55, "Syscall_Disk_IO": 0.15, "Network_Perf": 0.05, "Startup_RAM_Eff": 0.10, "Host_Visibility": 0.15},
 }
 
 prof_scores = pd.DataFrame(index=ORDER)
@@ -214,12 +201,11 @@ for pname, wdict in profiles.items():
 full_matrix = pd.concat([dims, prof_scores], axis=1)
 full_matrix.to_csv("results/module3_decision_matrix.csv")
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.6, 4.6), gridspec_kw={"width_ratios": [1.15, 1.0]})
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12.0, 4.7), gridspec_kw={"width_ratios": [1.18, 1.0]})
 
-# Panel (a): Normalized Dimension Heatmap
 dim_cols = list(dims.columns)
-dim_labels = ["Security\n(15-Probe)", "Syscall &\nDisk I/O", "Network\n(TCP)", "Startup &\nIdle RAM", "Blue Team\n(Poll+eBPF)"]
-im = ax1.imshow(dims.values, cmap="RdYlGn", vmin=0, vmax=100, aspect="auto")
+dim_labels = ["Security\n(15-Check)", "Syscall &\nDisk I/O", "Network\n(TCP)", "Startup &\nIdle RAM", "Host\nVisibility"]
+ax1.imshow(dims.values, cmap="RdYlGn", vmin=0, vmax=100, aspect="auto")
 ax1.set_xticks(np.arange(len(dim_cols)))
 ax1.set_xticklabels(dim_labels, fontsize=8.4)
 ax1.set_yticks(np.arange(len(ORDER)))
@@ -232,11 +218,10 @@ for i in range(len(ORDER)):
         txt_col = "white" if (val < 30 or val > 85) else "black"
         ax1.text(j, i, f"{val:.1f}", ha="center", va="center", fontsize=8.5, fontweight="bold", color=txt_col)
 
-# Panel (b): Weighted Profile Scores
 xp = np.arange(len(ORDER))
 wp = 0.25
 p_defs = [
-    ("General_EDR", "General / EDR-Monitored", "#2b5c8f"),
+    ("General_Monitored", "General / Monitored", "#2b5c8f"),
     ("High_Throughput", "High-Throughput Services", "#d35400"),
     ("Security_First", "Security-First Sandbox", "#27ae60"),
 ]
@@ -255,17 +240,8 @@ ax2.set_ylim(0, 105)
 ax2.grid(axis="y", linestyle="--", alpha=0.35)
 ax2.legend(fontsize=7.8, loc="upper right")
 
-fig.suptitle("Fig. 11. Empirical Multi-Criteria Decision Matrix Across Five Linux Container Runtimes", y=1.01)
-fig.tight_layout()
-plt.savefig("results/figures/fig11_weighted_decision_matrix.png", dpi=300, bbox_inches="tight")
+fig.suptitle("Empirical Multi-Criteria Decision Matrix Across Five Linux Container Runtimes", y=0.99)
+fig.tight_layout(rect=[0.04, 0, 1, 0.94])
+plt.savefig("results/figures/fig11_weighted_decision_matrix.png", dpi=300, bbox_inches="tight", pad_inches=0.2)
 plt.close()
-
-print("\n=== MODULE 3: POLLING VS. EBPF COMPARISON ===")
-print(comp_df[["poll_det_pct", "poll_mttd_ms", "poll_resp_ms", "ebpf_det_pct", "ebpf_kern_mttd_ms", "ebpf_resp_ms", "resp_speedup_x", "ebpf_g3_spoof_pct"]].to_string())
-print("\n=== MODULE 3: POLLING MTTD BY VIRUS & GEN (ms) ===")
-print(gen_poll.round(1).to_string())
-print("\n=== MODULE 3: EBPF KERNEL MTTD BY VIRUS & GEN (ms) ===")
-print(gen_ebpf.round(2).to_string())
-print("\n=== FINAL WEIGHTED DECISION MATRIX (0-100) ===")
-print(full_matrix.to_string())
-print("\nSaved fig9, fig10, fig11 and summary CSVs.")
+print("Regenerated clean Fig. 9, Fig. 10, and Fig. 11")

@@ -76,7 +76,7 @@ ax.set_xticks(x)
 ax.set_xticklabels(OP_LABELS, fontsize=9.5)
 ax.grid(axis="y", which="both", linestyle="--", alpha=0.35)
 ax.legend(ncol=3, fontsize=8.5, loc="upper left", frameon=True)
-plt.title("Fig. 5. OS Syscall and Virtual Memory Primitive Latency (Mean ± Std, 5 Trials)")
+plt.title("OS Syscall and Virtual Memory Primitive Latency (Mean ± Std, 5 Trials)")
 fig.tight_layout()
 plt.savefig("results/figures/fig5_syscall_microbench.png", dpi=300)
 plt.close()
@@ -112,7 +112,7 @@ for i, (m, s, rs) in enumerate(zip(tp_m, tp_s, raw_s)):
     color = "#1e8449" if rs == "BLOCKED" else "#922b21"
     ax2.text(i, m + s + max(tp_m)*0.025, f"{m:.0f}\n({tag})", ha="center", va="bottom", fontsize=7.8, fontweight="bold", color=color)
 
-fig.suptitle("Fig. 6. Network Stack Latency, Throughput, and Raw Socket Isolation (Mean ± Std, 5 Trials)", y=1.01)
+fig.suptitle("Network Stack Latency, Throughput, and Raw Socket Isolation (Mean ± Std, 5 Trials)", y=1.01)
 fig.tight_layout()
 plt.savefig("results/figures/fig6_network_overhead.png", dpi=300, bbox_inches="tight")
 plt.close()
