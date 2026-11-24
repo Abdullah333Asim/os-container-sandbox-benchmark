@@ -1,19 +1,20 @@
-# Linux Container Security & Performance Benchmark
+# Evaluating Security Isolation, Performance Overhead, and Monitoring Visibility Across Five Linux Container Runtimes
 
-This project compares five Linux container tools (**Docker**, **Podman (rootless)**, **containerd**, **gVisor**, and **LXC**) on the same Ubuntu machine. We test how well each container blocks attacks, how much it slows down the system, and how easily host monitoring tools can catch malware running inside it.
+This project compares five Linux container tools—**Docker**, **Podman (rootless)**, **containerd**, **gVisor**, and **LXC**—on the same Ubuntu machine. We test how well each runtime blocks unsafe operations, how much overhead it adds to system calls, disk I/O, memory, and networking, and how clearly host security monitors can detect attacks running inside a container.
 
 ## Team Members
 - **Muhammad Abdullah Asim**
 - **Maaz Ahmed Siddiqui**
 - **Bilal Sheraz**
+
 ---
 
 ## What We Tested
 
-1. **Phase 1 - Baseline & Polling Monitor:** Startup time, idle RAM, small-block disk writes, 8 basic security checks, and 135 attack trials using a host polling monitor (`psutil`).
-2. **Module 1 - System Calls & Network Speed:** Exact time per Linux system call (`getpid`, `open/close`, `pipe`, `mmap`, `fork`) plus container-to-host TCP speed and raw socket (`SOCK_RAW`) blocking.
-3. **Module 2 - Active Security & Stress Limits:** 15 active security checks (including reading a bind-mounted host root file), a 500-process fork bomb, and an 8-thread CPU stress test, both with default settings and with cgroup limits (`64` PIDs and `1` CPU).
-4. **Module 3 - Kernel eBPF Monitor:** Re-ran all 135 attack trials using a kernel-level `bpftrace` monitor to compare it against user-space polling, then ranked all 5 runtimes for different use cases.
+1. **Module 1 - Baseline Overhead, Basic Security & Polling Monitor:** Measured startup time, idle RAM, small-block disk writes, 8 basic security checks, and 135 simulated attack trials monitored by a timer-based host polling script (`psutil`).
+2. **Module 2 - System Calls & Network Speed:** Measured exact latency for 5 Linux system call operations (`getpid`, `open/close`, `pipe`, `mmap`, `fork`) against the bare host, plus container-to-host TCP speed and raw socket (`SOCK_RAW`) blocking.
+3. **Module 3 - Active Security Audit, Fork Bomb & CPU Starvation:** Expanded to 15 active security checks (including reading a shared host `root` secret file), a 500-process fork bomb, and an 8-thread CPU stress test—comparing default settings against cgroup v2 limits (`64` PIDs and `1` CPU).
+4. **Module 4 - Kernel eBPF Monitor & Final Comparison:** Re-ran all 135 simulated attack trials using an event-driven Linux kernel monitor (`bpftrace`) to compare against polling, then combined all results into a weighted comparison across three example use cases.
 
 ---
 
@@ -22,10 +23,10 @@ This project compares five Linux container tools (**Docker**, **Podman (rootless
 ```text
 os-container-sandbox-benchmark/
 ├── setup/          # Installs all 5 runtimes and builds the shared test image
-├── red_team/       # C malware tests, fork bomb, CPU stress, and security check scripts
-├── microbench/     # C benchmarks for system calls and TCP networking
+├── red_team/       # C attack test programs, fork bomb, CPU stress, and security check scripts
+├── microbench/     # C benchmarks for system call latency and TCP networking
 ├── blue_team/      # Host workload, polling monitor, and kernel eBPF monitor
-├── benchmarks/     # Scripts that run Phase 1, Module 1, and Module 2
+├── benchmarks/     # Scripts that run Modules 1, 2, and 3
 ├── analysis/       # Python scripts that build summary tables and Figures 1-11
 ├── results/        # All raw CSV data, summary tables, and saved PNG graphs
 └── report/         # IEEE LaTeX report (main.tex) and ready-to-upload overleaf_bundle.zip
@@ -44,7 +45,7 @@ os-container-sandbox-benchmark/
 ### 1. Download the Repository
 
 ```bash
-git clone https://github.com/Abdullah333Asim/os-container-sandbox-benchmark.git
+git clone [https://github.com/Abdullah333Asim/os-container-sandbox-benchmark.git](https://github.com/Abdullah333Asim/os-container-sandbox-benchmark.git)
 cd os-container-sandbox-benchmark
 ```
 
@@ -61,7 +62,7 @@ sudo systemctl reboot -i
 
 ### 3. Create the LXC Container and Build All Test Programs
 
-This builds one Ubuntu 24.04 container image and copies the exact same compiled C programs into all 5 runtimes and the host:
+This builds one Ubuntu 24.04 container image and copies the exact same compiled C programs into all 5 runtimes and onto the host:
 
 ```bash
 sudo lxc-create -t download -n redteam-lxc -- -d ubuntu -r noble -a amd64
@@ -69,21 +70,21 @@ chmod +x setup/build_images.sh
 ./setup/build_images.sh
 ```
 
-### 4. Run the Tests
+### 4. Run the Four Modules
 
-You can run all four stages in order (pass `1` instead of `3` or `5` for a quick test run):
+Pass `1` instead of `3` or `5` for a quick test run *(script names match the internal repo files)*:
 
 ```bash
-# Phase 1: Baseline + 135 polling monitor trials (~8 min)
+# Module 1: Baseline overhead + 135 polling monitor trials (~8 min)
 sudo ./benchmarks/run_all.sh 3
 
-# Module 1: System call and TCP network benchmarks, 5 trials (~2 min)
+# Module 2: System call and TCP network benchmarks, 5 trials (~2 min)
 sudo ./benchmarks/run_module1.sh 5
 
-# Module 2: 15 security checks, fork bomb, and CPU stress, 3 trials (~5 min)
+# Module 3: 15 security checks, fork bomb, and CPU stress, 3 trials (~5 min)
 sudo ./benchmarks/run_module2.sh 3
 
-# Module 3: 135 kernel eBPF monitor trials (~3 min)
+# Module 4: 135 kernel eBPF monitor trials (~3 min)
 sudo python3 blue_team/ebpf_arena.py --trials 3 --timeout 4.0 --out results/module3_ebpf_arena.csv
 ```
 
@@ -102,7 +103,7 @@ All graphs (`fig1` through `fig11`) are saved in `results/figures/`.
 
 ## Summary of Results
 
-| Runtime | 15-Probe Security | Capabilities | Startup (ms) | Idle RAM (MB) | Disk I/O (MB/s) | TCP Speed (MB/s) | Polling Catch Rate | eBPF Catch Rate | eBPF Kill Time (ms) |
+| Runtime | 15-Check Security | Capabilities | Startup (ms) | Idle RAM (MB) | Disk I/O (MB/s) | TCP Speed (MB/s) | Polling Catch Rate | eBPF Catch Rate | eBPF Kill Time (ms) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | **Docker** | 8/15 (53.3%) | 14 | 532.7 | **1.5** | 92.0 | **1,968.7** | 100.0% | 100.0% | 548.6 |
 | **Podman (rootless)** | **11/15 (73.3%)** | **11** | 460.0 | 1.6 | **134.3** | 641.7 | 100.0% | 100.0% | **544.6** |
@@ -112,11 +113,11 @@ All graphs (`fig1` through `fig11`) are saved in `results/figures/`.
 
 ### Main Takeaways
 
-- **Best for security + everyday use: Rootless Podman.** Highest security score (11/15), only runtime that blocked reading a bind-mounted host root file, fast disk I/O, and 100% visibility for both monitors. Its TCP networking is slower than Docker and containerd, though.
-- **Best for high-speed networking: Docker & containerd.** Fastest TCP transfers (1,796-1,969 MB/s) and near-native system calls, with 100% eBPF visibility. Both need extra hardening (dropping capabilities and setting cgroup limits).
-- **Best for isolating untrusted code from the host kernel: gVisor.** Strong kernel separation, but much slower on system calls (3.25x-30.68x) and disk I/O (24.0 MB/s), and it hides container activity from host eBPF monitors (0% detected).
-- **Cgroup limits matter everywhere.** With default settings, all 5 runtimes allowed all 500 fork-bomb processes and let an 8-thread stress attack cut host CPU speed almost in half (55%-58%). Adding cgroup limits fixed both issues across every runtime.
-- **Avoid default rootful LXC for untrusted code.** Scored lowest on security (2/15, 36 capabilities open, including `mount` and `bpf`).
+- **Best for security + everyday use — Rootless Podman:** Earned the highest security score, was the only runtime that blocked reading a shared host `root` file, matched native system call and disk speed, and kept full visibility for both monitors—with the trade-off of slower container-to-host TCP networking.
+- **Best for high-speed networking — Docker & containerd:** Delivered the fastest TCP speeds, near-native system calls, and full eBPF visibility, though operators should still drop unused capabilities (such as `CAP_NET_RAW`) and set cgroup limits.
+- **Best for separating untrusted code from the host kernel — gVisor:** Strong kernel isolation via its user-space Sentry kernel, but much slower on system calls (3.25x–30.68x) and small disk writes, and it completely hides container activity from host eBPF monitors.
+- **Cgroup limits are required everywhere:** Under default settings, all 5 runtimes allowed a full 500-process fork bomb and let an 8-thread CPU attack drop host throughput to roughly 55%–58%. Enforcing cgroup v2 limits contained both attacks across every runtime.
+- **Avoid default rootful LXC for untrusted code:** Left the widest attack surface open (36 capabilities, including `mount` and `bpf`).
 
 ---
 
